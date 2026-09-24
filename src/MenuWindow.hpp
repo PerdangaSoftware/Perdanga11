@@ -4,6 +4,8 @@
 #endif
 #define WIN32_LEAN_AND_MEAN
 
+#include <windowsx.h>
+#include <commctrl.h>
 #include "resource.h"
 #include "MenuState.hpp"
 
@@ -47,14 +49,26 @@ public:
                 SetWindowSubclass(g_hSearchEdit, SearchEditSubclass, 0, 0);
 
                 SetTimer(hwnd, TIMER_UPDATE_RECT, 2500, nullptr);
+
+                // Guarantee layer for the "native Start must never appear"
+                // invariant: even if every event-based path misses (hook timeout,
+                // race, touch input), this sweep hides any visible native Start /
+                // Search overlay within one tick.
+                SetTimer(hwnd, TIMER_BLOCK_START, 100, Hooks::NativeStartWatchdogTimer);
                 return 0;
             }
 
+            case WM_DISPLAYCHANGE:
             case WM_SETTINGCHANGE:
             case WM_THEMECHANGED: {
                 Config::UpdateThemeCache();
                 UpdateThemeAttributes(hwnd);
                 InvalidateRect(hwnd, nullptr, TRUE);
+                // Taskbar geometry (size, alignment, auto-hide, monitor layout) may
+                // have changed. Re-resolve the Start button rect soon so clicks on it
+                // are never missed while the cached rect is stale. Debounced because
+                // WM_SETTINGCHANGE can arrive in bursts.
+                SetTimer(hwnd, TIMER_RECT_DEBOUNCE, 250, nullptr);
                 return 0;
             }
 
@@ -139,6 +153,9 @@ public:
                     StepAnimation();
                 } else if (wParam == TIMER_UPDATE_RECT) {
                     Hooks::UpdateStartButtonRect();
+                } else if (wParam == TIMER_RECT_DEBOUNCE) {
+                    KillTimer(hwnd, TIMER_RECT_DEBOUNCE);
+                    Hooks::UpdateStartButtonRect();
                 } else if (wParam == TIMER_SEARCH_DEBOUNCE) {
                     KillTimer(hwnd, TIMER_SEARCH_DEBOUNCE);
                     ExecuteAsyncSearch();
@@ -170,6 +187,16 @@ public:
                 return 0;
             }
 
+            // Idempotent response to a suppressed native Start menu: open ours only
+            // when it is not open yet. User-driven toggles keep their flip semantics
+            // via WM_APP_TOGGLE_MENU, so a double-post of this message is harmless.
+            case WM_APP_NATIVE_START_OPENED: {
+                if (!g_isVisible) {
+                    Toggle(true);
+                }
+                return 0;
+            }
+
             case WM_COMMAND: {
                 if (LOWORD(wParam) == ID_SEARCH_BOX && HIWORD(wParam) == EN_CHANGE) {
                     g_scrollY = 0;
@@ -194,8 +221,8 @@ public:
             }
 
             case WM_LBUTTONDOWN: {
-                int x = LOWORD(lParam);
-                int y = HIWORD(lParam);
+                int x = GET_X_LPARAM(lParam);
+                int y = GET_Y_LPARAM(lParam);
                 POINT pt = { x, y };
 
                 g_showTooltip = false;
@@ -248,8 +275,8 @@ public:
             }
 
             case WM_MOUSEMOVE: {
-                int x = LOWORD(lParam);
-                int y = HIWORD(lParam);
+                int x = GET_X_LPARAM(lParam);
+                int y = GET_Y_LPARAM(lParam);
                 POINT pt = { x, y };
 
                 if (MenuInteraction::g_isPowerMenuOpen && PtInRect(&g_powerFlyoutRect, pt)) {
@@ -378,8 +405,8 @@ public:
 
             // Middle Click: Launches app and keeps menu open (convenient alternative)
             case WM_MBUTTONUP: {
-                int x = LOWORD(lParam);
-                int y = HIWORD(lParam);
+                int x = GET_X_LPARAM(lParam);
+                int y = GET_Y_LPARAM(lParam);
                 int relY = y - GRID_START_Y + g_scrollY;
 
                 if (x >= GRID_START_X && x < GRID_START_X + (GRID_COLS * CELL_WIDTH) && y >= GRID_START_Y && y <= GRID_START_Y + VIEWPORT_HEIGHT && relY >= 0) {
@@ -518,8 +545,8 @@ public:
             }
 
             case WM_LBUTTONUP: {
-                int x = LOWORD(lParam);
-                int y = HIWORD(lParam);
+                int x = GET_X_LPARAM(lParam);
+                int y = GET_Y_LPARAM(lParam);
                 POINT pt = { x, y };
 
                 ReleaseCapture();
@@ -527,12 +554,24 @@ public:
                 KillTimer(hwnd, TIMER_HOVER_TOOLTIP);
 
                 if (g_isDragging) {
-                    auto& activeTab = Config::GetActiveTab();
-                    if (g_dragItemIndex >= 0 && g_dragTargetIndex >= 0 && g_dragItemIndex != g_dragTargetIndex) {
-                        AppItem moved = activeTab.items[g_dragItemIndex];
-                        activeTab.items.erase(activeTab.items.begin() + g_dragItemIndex);
-                        activeTab.items.insert(activeTab.items.begin() + g_dragTargetIndex, moved);
-                        Config::SaveAllTabItemsOrder(activeTab, activeTab.items);
+                    bool reordered = false;
+                    {
+                        // Tab items are shared with search workers: reorder under the index lock
+                        std::lock_guard<std::mutex> lock(Config::g_indexMutex);
+                        if (!Config::g_tabs.empty()) {
+                            auto& activeTab = Config::GetActiveTab();
+                            if (g_dragItemIndex >= 0 && g_dragTargetIndex >= 0 &&
+                                g_dragItemIndex != g_dragTargetIndex &&
+                                g_dragItemIndex < (int)activeTab.items.size()) {
+                                AppItem moved = activeTab.items[g_dragItemIndex];
+                                activeTab.items.erase(activeTab.items.begin() + g_dragItemIndex);
+                                activeTab.items.insert(activeTab.items.begin() + g_dragTargetIndex, moved);
+                                Config::SaveAllTabItemsOrder(activeTab, activeTab.items);
+                                reordered = true;
+                            }
+                        }
+                    }
+                    if (reordered) {
                         TriggerSearch();
                     }
                     g_isDragging = false;
@@ -747,10 +786,12 @@ public:
             case WM_DESTROY: {
                 KillTimer(hwnd, TIMER_ANIMATION);
                 KillTimer(hwnd, TIMER_UPDATE_RECT);
+                KillTimer(hwnd, TIMER_RECT_DEBOUNCE);
                 KillTimer(hwnd, TIMER_SEARCH_DEBOUNCE);
                 KillTimer(hwnd, TIMER_HOVER_TOOLTIP);
                 KillTimer(hwnd, TIMER_LAUNCH_FLASH);
                 KillTimer(hwnd, TIMER_RESET_DEACTIVATE);
+                KillTimer(hwnd, TIMER_BLOCK_START);
                 if (g_hFontSearch) DeleteObject(g_hFontSearch);
 
                 MenuRenderer::FreeFonts();
@@ -788,6 +829,86 @@ public:
     }
 };
 
+inline void CALLBACK Hooks::WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG, LONG, DWORD, DWORD) {
+    if (event != EVENT_SYSTEM_FOREGROUND || !hwnd || hwnd == g_hTargetWnd) return;
+
+    // Native Start must never stay visible while Perdanga11 is running:
+    // hide it immediately and open our menu instead (if it is not open yet)
+    if (IsNativeStartWindow(hwnd)) {
+        ShowWindow(hwnd, SW_HIDE);
+        if (!MenuWindow::g_isVisible) {
+            PostMessageW(g_hTargetWnd, WM_APP_NATIVE_START_OPENED, 0, 0);
+        }
+        return;
+    }
+
+    // Native Search took the foreground: close our menu so windows never overlap
+    if (IsNativeSearchWindow(hwnd)) {
+        if (MenuWindow::g_isVisible) {
+            PostMessageW(g_hTargetWnd, WM_APP_CLOSE_MENU, 0, 0);
+        }
+        return;
+    }
+
+    // Fallback for older builds: detect overlays by window class and title
+    wchar_t className[256] = { 0 };
+    GetClassNameW(hwnd, className, 256);
+    if (wcscmp(className, L"Windows.UI.Core.CoreWindow") != 0) return;
+
+    wchar_t title[256] = { 0 };
+    GetWindowTextW(hwnd, title, 256);
+
+    if (wcscmp(title, L"Search") == 0 || wcscmp(title, L"\x041F\x043E\x0438\x0441\x043A") == 0) {
+        if (MenuWindow::g_isVisible) {
+            PostMessageW(g_hTargetWnd, WM_APP_CLOSE_MENU, 0, 0);
+        }
+        return;
+    }
+
+    if (wcscmp(title, L"Start") == 0 || wcscmp(title, L"\x041F\x0443\x0441\x043A") == 0) {
+        ShowWindow(hwnd, SW_HIDE);
+        if (!MenuWindow::g_isVisible) {
+            PostMessageW(g_hTargetWnd, WM_APP_NATIVE_START_OPENED, 0, 0);
+        }
+    }
+}
+
+// Guarantee layer for the "native Start must never appear" invariant. The
+// foreground watcher above is only the fast path: this sweep hides any visible
+// native Start / Search overlay no matter how it was opened (hook timeout, race
+// between click interception and shell activation, touch input). The expensive
+// per-window process verification only runs for the rare visible
+// Windows.UI.Core.CoreWindow candidates, so the steady-state cost of the tick
+// is a single EnumWindows pass over the visible top-level windows.
+inline void CALLBACK Hooks::NativeStartWatchdogTimer(HWND, UINT, UINT_PTR, DWORD) {
+    EnumWindows(NativeStartWatchdogEnumProc, 0);
+}
+
+inline BOOL CALLBACK Hooks::NativeStartWatchdogEnumProc(HWND hwnd, LPARAM) {
+    if (!IsWindowVisible(hwnd)) return TRUE;
+
+    wchar_t className[64] = { 0 };
+    GetClassNameW(hwnd, className, 64);
+    if (wcscmp(className, L"Windows.UI.Core.CoreWindow") != 0) return TRUE;
+
+    if (IsNativeStartWindow(hwnd)) {
+        ShowWindow(hwnd, SW_HIDE);
+        if (!MenuWindow::g_isVisible) {
+            PostMessageW(g_hTargetWnd, WM_APP_NATIVE_START_OPENED, 0, 0);
+        }
+        return TRUE;
+    }
+
+    if (IsNativeSearchWindow(hwnd)) {
+        if (MenuWindow::g_isVisible) {
+            PostMessageW(g_hTargetWnd, WM_APP_CLOSE_MENU, 0, 0);
+        }
+        return TRUE;
+    }
+
+    return TRUE;
+}
+
 inline LRESULT CALLBACK Hooks::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION) {
         MSLLHOOKSTRUCT* pMouse = (MSLLHOOKSTRUCT*)lParam;
@@ -812,11 +933,14 @@ inline LRESULT CALLBACK Hooks::LowLevelMouseProc(int nCode, WPARAM wParam, LPARA
 
                     if (PtInRect(&startHit, pt) && IsCursorDirectlyOnTaskbar(pt)) {
                         g_mouseClickIntercepted = true;
-                        MenuWindow::CloseImmediately();
+                        // Post, never call CloseImmediately() directly: this runs on the
+                        // hook thread and a synchronous UI call would block on the busy
+                        // UI thread, re-triggering the very hook timeout we removed.
+                        PostMessageW(g_hTargetWnd, WM_APP_CLOSE_MENU, 0, 0);
                         return 1;
                     }
 
-                    MenuWindow::CloseImmediately();
+                    PostMessageW(g_hTargetWnd, WM_APP_CLOSE_MENU, 0, 0);
                 }
             }
         }

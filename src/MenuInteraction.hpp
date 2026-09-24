@@ -168,19 +168,17 @@ public:
             }
             if (SUCCEEDED(pfd->Show(hWnd))) {
                 IShellItem* psi = nullptr;
-                if (SUCCEEDED(pfd->GetResult(&psi))) {
+                if (SUCCEEDED(pfd->GetResult(&psi)) && psi) {
                     PWSTR pszPath = nullptr;
-                    if (SUCCEEDED(psi->GetDisplayName(SIGDN_FILESYSPATH, &pszPath))) {
+                    if (SUCCEEDED(psi->GetDisplayName(SIGDN_FILESYSPATH, &pszPath)) && pszPath) {
                         outPath = pszPath;
                         size_t lastSlash = outPath.find_last_of(L"\\/");
                         outName = (lastSlash != std::wstring::npos) ? outPath.substr(lastSlash + 1) : outPath;
                         if (outName.empty()) outName = outPath;
                         CoTaskMemFree(pszPath);
-                        psi->Release();
-                        pfd->Release();
                         ok = true;
                     }
-                    if (psi) psi->Release();
+                    psi->Release();
                 }
             }
             pfd->Release();
@@ -389,7 +387,12 @@ public:
         DwmSetWindowAttribute(hDlg, DWMWA_BORDER_COLOR, &bdr, sizeof(bdr));
 
         MSG msg;
-        while (IsWindow(hDlg) && GetMessageW(&msg, nullptr, 0, 0)) {
+        while (IsWindow(hDlg)) {
+            if (!GetMessageW(&msg, nullptr, 0, 0)) {
+                // Do not swallow WM_QUIT: repost it so the main loop can exit
+                PostQuitMessage((int)msg.wParam);
+                break;
+            }
             if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
                 DestroyWindow(hDlg);
                 break;

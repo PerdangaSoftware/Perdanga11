@@ -5,7 +5,7 @@
 <h1 align="center">Perdanga11</h1>
 
 <p align="center">
-  <b>Fast, lightweight native C++ replacement for the Windows 11 Start Menu with custom tabs and multi file search.</b>
+  <b>Native C++ replacement for the Windows 11 Start Menu with custom tabs and multi file search.</b>
 </p>
 
 <br/>

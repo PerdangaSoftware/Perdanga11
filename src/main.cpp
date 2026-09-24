@@ -40,11 +40,26 @@
 #define ID_TRAY_AUTOSTART 2002
 #define ID_TRAY_OPEN_CONFIG 2003
 
-#ifndef MSGFLT_ADD
-#define MSGFLT_ADD 1
+#ifndef MSGFLT_ALLOW
+#define MSGFLT_ALLOW 1
 #endif
 
 NOTIFYICONDATAW g_nid = { 0 };
+
+// Allow non-elevated Explorer context menu invocations to post messages through UIPI.
+// Scoped to our window only, instead of loosening the filter for the whole process
+static void AllowCrossIntegrityMessages(HWND hwnd) {
+    typedef BOOL(WINAPI* PFN_ChangeWindowMessageFilterEx)(HWND, UINT, DWORD, PVOID);
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    if (!hUser32) return;
+
+    auto pFilterEx = (PFN_ChangeWindowMessageFilterEx)GetProcAddress(hUser32, "ChangeWindowMessageFilterEx");
+    if (!pFilterEx) return;
+
+    pFilterEx(hwnd, WM_APP_INDEX_READY, MSGFLT_ALLOW, nullptr);
+    pFilterEx(hwnd, WM_APP_TOGGLE_MENU, MSGFLT_ALLOW, nullptr);
+    pFilterEx(hwnd, WM_PAINT, MSGFLT_ALLOW, nullptr);
+}
 
 LRESULT CALLBACK SubclassedTrayProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_TRAYICON) {
@@ -101,18 +116,6 @@ LRESULT CALLBACK SubclassedTrayProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM 
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
-    // Allow non-elevated Explorer context menu invocations to post messages through UIPI
-    typedef BOOL(WINAPI* PFN_ChangeWindowMessageFilter)(UINT, DWORD);
-    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
-    if (hUser32) {
-        auto pChangeFilter = (PFN_ChangeWindowMessageFilter)GetProcAddress(hUser32, "ChangeWindowMessageFilter");
-        if (pChangeFilter) {
-            pChangeFilter(WM_APP_INDEX_READY, MSGFLT_ADD);
-            pChangeFilter(WM_APP_TOGGLE_MENU, MSGFLT_ADD);
-            pChangeFilter(WM_PAINT, MSGFLT_ADD);
-        }
-    }
-
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argc >= 3 && _wcsicmp(argv[1], L"--pin") == 0) {
@@ -178,6 +181,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     Config::RegisterShellContextMenu();
 
     HWND hMainWnd = MenuWindow::Create(hInstance);
+
+    // Let a non-elevated "--pin" invocation post our custom messages through UIPI
+    AllowCrossIntegrityMessages(hMainWnd);
 
     Config::StartAsyncIndexing(hMainWnd);
 

@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <thread>
 #include <mutex>
+#include <memory>
 
 #define WM_APP_INDEX_READY      (WM_USER + 4)
 #define WM_APP_SEARCH_COMPLETE  (WM_USER + 5)
@@ -45,15 +46,23 @@ struct TabDefinition {
     bool hovered = false;
 };
 
+// Immutable search index published by the background indexer thread.
+// Readers grab the shared_ptr under g_indexMutex, then iterate lock-free.
+struct IndexSnapshot {
+    std::vector<AppItem> installedApps;
+    std::vector<AppItem> frequentFolders;
+    std::vector<AppItem> userFiles;
+};
+
 class Config {
 public:
     static const inline size_t MAX_TABS = 128;
 
-    static inline std::vector<AppItem> g_cachedInstalledApps;
-    static inline std::vector<AppItem> g_cachedFrequentFolders;
-    static inline std::vector<AppItem> g_cachedUserFiles;
+    static inline std::shared_ptr<const IndexSnapshot> g_indexSnapshot;
     static inline std::vector<TabDefinition> g_tabs;
     static inline int g_activeTabIndex = 0;
+    // Guards g_indexSnapshot publication AND every mutation of g_tabs / tab.items,
+    // so search workers can snapshot them safely while the UI thread keeps editing
     static inline std::mutex g_indexMutex;
     static inline bool g_isIndexingComplete = false;
     static inline AppLanguage g_configuredLanguage = AppLanguage::Auto;
@@ -178,6 +187,10 @@ public:
     }
 
     static std::wstring GetConfigPath() {
+        // Resolved once per process: avoids repeated write-permission probes on every access
+        static std::wstring cachedPath;
+        if (!cachedPath.empty()) return cachedPath;
+
         std::wstring exePath = GetExecutablePath();
         size_t pos = exePath.find_last_of(L"\\/");
         std::wstring exeDir = (pos != std::wstring::npos) ? exePath.substr(0, pos + 1) : L"";
@@ -189,25 +202,27 @@ public:
             if (hTest != INVALID_HANDLE_VALUE) {
                 CloseHandle(hTest);
                 DeleteFileW(testTmp.c_str());
-                return localIni;
+                cachedPath = localIni;
+                return cachedPath;
             }
         }
 
         PWSTR pAppData = nullptr;
-        std::wstring appDataIni = L"";
         if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &pAppData)) && pAppData) {
             std::wstring appDataFolder = std::wstring(pAppData) + L"\\Perdanga11";
             CoTaskMemFree(pAppData);
             CreateDirectoryW(appDataFolder.c_str(), nullptr);
-            appDataIni = appDataFolder + L"\\config.ini";
+            std::wstring appDataIni = appDataFolder + L"\\config.ini";
 
             if (!DoesFileExist(appDataIni) && DoesFileExist(localIni)) {
                 CopyFileW(localIni.c_str(), appDataIni.c_str(), TRUE);
             }
-            return appDataIni;
+            cachedPath = appDataIni;
+            return cachedPath;
         }
 
-        return localIni;
+        cachedPath = localIni;
+        return cachedPath;
     }
 
     static bool IsAppPinned(const std::wstring& name, const std::vector<AppItem>& pinnedList) {
@@ -275,7 +290,9 @@ public:
 
                 while (RegEnumKeyExW(hParent, index++, subKeyName, &nameLen, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS) {
                     std::wstring lower = ToLower(subKeyName);
-                    if (lower.find(L"perdanga") != std::wstring::npos || lower.find(L"pinto") != std::wstring::npos) {
+                    // Only remove our own verbs (current "Perdanga11.Pin" and legacy
+                    // "PinToPerdanga11"); never touch keys belonging to other software
+                    if (lower.rfind(L"perdanga11", 0) == 0 || lower == L"pintoperdanga11") {
                         toDelete.push_back(subKeyName);
                     }
                     nameLen = 256;
@@ -473,6 +490,8 @@ public:
         }
     }
 
+    // NOTE: LoadTabs mutates g_tabs without locking; callers must either hold
+    // g_indexMutex already or run before worker threads exist (WM_CREATE)
     static void LoadTabs() {
         EnsureConfigUnicode();
         UpdateThemeCache();
@@ -600,12 +619,15 @@ public:
         newTab.section = L"Tab_" + safeId;
         newTab.isFolder = false;
         newTab.visible = true;
+
+        std::lock_guard<std::mutex> lock(g_indexMutex);
         g_tabs.push_back(newTab);
         SaveTabs();
         g_activeTabIndex = (int)g_tabs.size() - 1;
     }
 
     static void RenameTab(int index, const std::wstring& newName) {
+        std::lock_guard<std::mutex> lock(g_indexMutex);
         if (index >= 0 && index < (int)g_tabs.size()) {
             g_tabs[index].name = newName;
             SaveTabs();
@@ -613,6 +635,7 @@ public:
     }
 
     static void DeleteTab(int index) {
+        std::lock_guard<std::mutex> lock(g_indexMutex);
         if (g_tabs.size() <= 1 || index < 0 || index >= (int)g_tabs.size()) return;
         std::wstring iniPath = GetConfigPath();
         std::wstring tabId = g_tabs[index].id;
@@ -631,6 +654,7 @@ public:
     }
 
     static void ToggleTabVisibility(int index) {
+        std::lock_guard<std::mutex> lock(g_indexMutex);
         if (index < 0 || index >= (int)g_tabs.size()) return;
         int visibleCount = 0;
         for (const auto& tab : g_tabs) if (tab.visible) visibleCount++;
@@ -642,7 +666,6 @@ public:
     }
 
     static void StartAsyncIndexing(HWND notifyWnd);
-    static int CalculateMatchScore(const std::wstring& target, const std::wstring& rawQuery);
     static HICON ExtractCleanIcon(const std::wstring& path, bool isDir = false);
     static HICON GetDefaultFolderIcon();
 };
@@ -651,10 +674,6 @@ public:
 
 inline void Config::StartAsyncIndexing(HWND notifyWnd) {
     AppIndexer::StartAsyncIndexing(notifyWnd);
-}
-
-inline int Config::CalculateMatchScore(const std::wstring& target, const std::wstring& rawQuery) {
-    return AppIndexer::CalculateMatchScore(target, rawQuery);
 }
 
 inline HICON Config::ExtractCleanIcon(const std::wstring& path, bool isDir) {

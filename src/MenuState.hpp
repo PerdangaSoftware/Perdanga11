@@ -28,6 +28,8 @@
 #define TIMER_HOVER_TOOLTIP     5005
 #define TIMER_LAUNCH_FLASH      5006
 #define TIMER_RESET_DEACTIVATE  5007
+#define TIMER_RECT_DEBOUNCE     5008
+#define TIMER_BLOCK_START       5009
 
 enum MenuViewMode {
     MODE_TABS = 0,
@@ -294,8 +296,12 @@ public:
     }
 
     static void ReloadPinnedData() {
-        for (auto& tab : Config::g_tabs) {
-            tab.items = Config::LoadTabItems(tab);
+        {
+            // Tab items are shared with search workers: mutate them under the index lock
+            std::lock_guard<std::mutex> lock(Config::g_indexMutex);
+            for (auto& tab : Config::g_tabs) {
+                tab.items = Config::LoadTabItems(tab);
+            }
         }
         RecalculateTabLayout();
         TriggerSearch();
@@ -314,8 +320,12 @@ public:
         if (sQuery.empty()) {
             g_searchGeneration.fetch_add(1);
             if (g_currentMode == MODE_ALL_APPS) {
-                std::lock_guard<std::mutex> lock(Config::g_indexMutex);
-                g_displayItems = Config::g_cachedInstalledApps;
+                std::shared_ptr<const IndexSnapshot> snap;
+                {
+                    std::lock_guard<std::mutex> lock(Config::g_indexMutex);
+                    snap = Config::g_indexSnapshot;
+                }
+                g_displayItems = snap ? snap->installedApps : std::vector<AppItem>();
             } else {
                 const auto& activeTab = Config::GetActiveTab();
                 g_displayItems = activeTab.items;
@@ -334,14 +344,35 @@ public:
         std::thread([currentGen, sQuery, targetWnd]() {
             std::wstring lowerQuery = Config::ToLower(sQuery);
 
+            // Convert the query (and every token) once per search instead of once
+            // per candidate item: this used to allocate inside the scoring hot loop
+            std::wstring convertedQuery = AppIndexer::ConvertKeyboardLayout(lowerQuery);
+
             std::vector<std::wstring> tokens;
+            std::vector<std::wstring> convertedTokens;
             size_t idx = 0;
             while (idx < lowerQuery.length()) {
                 while (idx < lowerQuery.length() && iswspace(lowerQuery[idx])) idx++;
                 if (idx >= lowerQuery.length()) break;
                 size_t start = idx;
                 while (idx < lowerQuery.length() && !iswspace(lowerQuery[idx])) idx++;
-                tokens.push_back(lowerQuery.substr(start, idx - start));
+                std::wstring token = lowerQuery.substr(start, idx - start);
+                std::wstring convToken = AppIndexer::ConvertKeyboardLayout(token);
+                tokens.push_back(token);
+                convertedTokens.push_back(convToken == token ? std::wstring() : convToken);
+            }
+
+            // Grab an immutable snapshot of the index and a copy of pinned tab items
+            // under a short lock, then score everything without holding the mutex
+            std::shared_ptr<const IndexSnapshot> snap;
+            std::vector<AppItem> pinnedItems;
+            {
+                std::lock_guard<std::mutex> lock(Config::g_indexMutex);
+                if (g_searchGeneration.load() != currentGen) return;
+                snap = Config::g_indexSnapshot;
+                for (const auto& tab : Config::g_tabs) {
+                    pinnedItems.insert(pinnedItems.end(), tab.items.begin(), tab.items.end());
+                }
             }
 
             std::vector<AppItem> candidates;
@@ -353,7 +384,7 @@ public:
             auto processItem = [&](const AppItem& item) {
                 if (seenTargets.count(item.lowerTarget) > 0) return;
 
-                int score = AppIndexer::CalculateItemScoreFast(item, lowerQuery, tokens);
+                int score = AppIndexer::CalculateItemScoreFast(item, lowerQuery, convertedQuery, tokens, convertedTokens);
                 if (score > 0) {
                     seenTargets.insert(item.lowerTarget);
                     AppItem scored = item;
@@ -362,36 +393,27 @@ public:
                 }
             };
 
-            {
-                std::lock_guard<std::mutex> lock(Config::g_indexMutex);
+            for (const auto& item : pinnedItems) {
+                processItem(item);
+            }
+            if (g_searchGeneration.load() != currentGen) return;
 
-                if (g_searchGeneration.load() != currentGen) return;
-
-                for (const auto& tab : Config::g_tabs) {
-                    for (const auto& item : tab.items) {
-                        processItem(item);
-                    }
-                }
-
-                if (g_searchGeneration.load() != currentGen) return;
-
-                for (const auto& item : Config::g_cachedInstalledApps) {
+            if (snap) {
+                for (const auto& item : snap->installedApps) {
                     processItem(item);
                 }
-
                 if (g_searchGeneration.load() != currentGen) return;
 
-                for (const auto& item : Config::g_cachedFrequentFolders) {
+                for (const auto& item : snap->frequentFolders) {
                     processItem(item);
                 }
-
                 if (g_searchGeneration.load() != currentGen) return;
 
-                for (size_t i = 0; i < Config::g_cachedUserFiles.size(); ++i) {
+                for (size_t i = 0; i < snap->userFiles.size(); ++i) {
                     if ((i & 511) == 0) {
                         if (g_searchGeneration.load() != currentGen) return;
                     }
-                    processItem(Config::g_cachedUserFiles[i]);
+                    processItem(snap->userFiles[i]);
                 }
             }
 
@@ -418,7 +440,8 @@ public:
 
     static void Toggle(bool show) {
         if (show) {
-            Hooks::DismissWindowsSearch();
+            // Hide native Start / Search overlays first so they never overlap our menu
+            Hooks::DismissNativeShellOverlays();
             MenuInteraction::g_isPowerMenuOpen = false;
             g_currentMode = MODE_TABS;
             g_scrollY = 0;

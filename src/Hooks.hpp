@@ -6,8 +6,10 @@
 #include <string>
 #include "Config.hpp"
 
-#define WM_APP_TOGGLE_MENU (WM_USER + 2)
-#define WM_APP_CLOSE_MENU  (WM_USER + 3)
+#define WM_APP_TOGGLE_MENU         (WM_USER + 2)
+#define WM_APP_CLOSE_MENU          (WM_USER + 3)
+// WM_USER + 4 / + 5 are reserved by Config.hpp (WM_APP_INDEX_READY / WM_APP_SEARCH_COMPLETE)
+#define WM_APP_NATIVE_START_OPENED (WM_USER + 6)
 
 class Hooks {
 public:
@@ -20,10 +22,32 @@ public:
     static inline bool g_winCombinationPressed = false;
     static inline bool g_mouseClickIntercepted = false;
 
+    // Dedicated thread that owns the low-level hooks. Keeping them off the UI
+    // thread is what makes the native-Start swallow reliable (see HookThreadProc).
+    static inline HINSTANCE g_hInst = nullptr;
+    static inline HANDLE g_hHookThread = nullptr;
+    static inline DWORD g_hookThreadId = 0;
+
     // Checks if the foreground application is running in full-screen mode (e.g. video games, media players)
     static bool IsForegroundFullScreen(POINT pt) {
         HWND hFore = GetForegroundWindow();
         if (!hFore || hFore == GetDesktopWindow()) return false;
+
+        // Clicking the desktop makes the shell desktop window (Progman / WorkerW)
+        // foreground; its rect spans the whole monitor and would falsely count as
+        // fullscreen, disabling Start interception. The same happens with any
+        // maximized overlapped window (e.g. Explorer).
+        wchar_t className[64] = { 0 };
+        if (GetClassNameW(hFore, className, 64)) {
+            if (wcscmp(className, L"Progman") == 0 || wcscmp(className, L"WorkerW") == 0) {
+                return false;
+            }
+        }
+
+        // True exclusive-fullscreen windows (games, media players) are borderless.
+        // Any window that keeps its caption bar is a regular app, even maximized.
+        DWORD foreStyle = (DWORD)GetWindowLongW(hFore, GWL_STYLE);
+        if ((foreStyle & WS_CAPTION) != 0) return false;
 
         HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
         if (hFore == hTaskbar) return false;
@@ -62,14 +86,56 @@ public:
         return false;
     }
 
-    static void DismissWindowsSearch() {
-        HWND hSearch = FindWindowW(L"Windows.UI.Core.CoreWindow", L"Search");
-        if (!hSearch) hSearch = FindWindowW(L"Windows.UI.Core.CoreWindow", L"\x041F\x043E\x0438\x0441\x043A");
+    // True when the window belongs to a process with the given image file name.
+    // Process-based detection survives window title/class changes across Win11 builds.
+    static bool IsWindowOwnedByProcess(HWND hwnd, const wchar_t* exeName) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (!pid) return false;
 
-        if (hSearch && IsWindowVisible(hSearch)) {
+        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!hProc) return false;
+
+        wchar_t path[MAX_PATH] = { 0 };
+        DWORD size = MAX_PATH;
+        BOOL ok = QueryFullProcessImageNameW(hProc, 0, path, &size);
+        CloseHandle(hProc);
+        if (!ok) return false;
+
+        const wchar_t* base = wcsrchr(path, L'\\');
+        base = base ? base + 1 : path;
+        return _wcsicmp(base, exeName) == 0;
+    }
+
+    static bool IsNativeStartWindow(HWND hwnd) {
+        return IsWindowOwnedByProcess(hwnd, L"StartMenuExperienceHost.exe");
+    }
+
+    static bool IsNativeSearchWindow(HWND hwnd) {
+        return IsWindowOwnedByProcess(hwnd, L"SearchHost.exe");
+    }
+
+    static BOOL CALLBACK HideShellOverlayEnumProc(HWND hwnd, LPARAM) {
+        if (!IsWindowVisible(hwnd)) return TRUE;
+
+        if (IsNativeStartWindow(hwnd) || IsNativeSearchWindow(hwnd)) {
+            ShowWindow(hwnd, SW_HIDE);
+        }
+        return TRUE;
+    }
+
+    // Forcibly dismisses native Start / Search overlays so they can never
+    // overlap the Perdanga11 menu (fixes "two windows hanging" on top of each other)
+    static void DismissNativeShellOverlays() {
+        // Graceful path first: ESC closes the overlay when it currently has focus
+        HWND hFore = GetForegroundWindow();
+        if (hFore && (IsNativeStartWindow(hFore) || IsNativeSearchWindow(hFore))) {
             keybd_event(VK_ESCAPE, 0, 0, 0);
             keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0);
         }
+
+        // Then hide any overlay windows still left on screen
+        EnumWindows(HideShellOverlayEnumProc, 0);
     }
 
     static void UpdateStartButtonRect() {
@@ -88,6 +154,7 @@ public:
             }
         }
 
+        bool startButtonResolved = false;
         IUIAutomation* pAutomation = nullptr;
         HRESULT hr = CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_IUIAutomation, (void**)&pAutomation);
         if (FAILED(hr) || !pAutomation) return;
@@ -108,6 +175,7 @@ public:
                     tagRECT rect;
                     if (SUCCEEDED(pStartBtn->get_CurrentBoundingRectangle(&rect))) {
                         g_startButtonRect = rect;
+                        startButtonResolved = true;
                     }
                     pStartBtn->Release();
                 }
@@ -116,6 +184,36 @@ public:
             pTaskbarElem->Release();
         }
         pAutomation->Release();
+
+        // Final fallback: derive the Start button position from the taskbar
+        // alignment setting. The Windows 11 taskbar renders inside a XAML island
+        // (no child HWND to find), so when the UIA "StartButton" automation id is
+        // missing on newer shell builds this keeps click interception alive.
+        if (!startButtonResolved) {
+            RECT rcTaskbar;
+            if (GetWindowRect(hTaskbar, &rcTaskbar)) {
+                DWORD taskbarAl = 1; // 1 = centered (Windows 11 default), 0 = left
+                HKEY hKey = nullptr;
+                if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                        L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+                        0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+                    DWORD type = 0;
+                    DWORD size = sizeof(DWORD);
+                    RegQueryValueExW(hKey, L"TaskbarAl", nullptr, &type, (LPBYTE)&taskbarAl, &size);
+                    RegCloseKey(hKey);
+                }
+
+                int btnSize = rcTaskbar.bottom - rcTaskbar.top;
+                if (btnSize > 0) {
+                    if (taskbarAl == 1) {
+                        int centerX = (rcTaskbar.left + rcTaskbar.right) / 2;
+                        g_startButtonRect = { centerX - btnSize / 2, rcTaskbar.top, centerX + btnSize / 2, rcTaskbar.bottom };
+                    } else {
+                        g_startButtonRect = { rcTaskbar.left, rcTaskbar.top, rcTaskbar.left + btnSize, rcTaskbar.bottom };
+                    }
+                }
+            }
+        }
     }
 
     static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
@@ -161,44 +259,75 @@ public:
 
     static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
 
-    static void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG, LONG, DWORD, DWORD) {
-        if (event == EVENT_SYSTEM_FOREGROUND && hwnd && hwnd != g_hTargetWnd) {
-            wchar_t className[256] = { 0 };
-            GetClassNameW(hwnd, className, 256);
+    // Defined in MenuWindow.hpp: needs MenuWindow visibility state to decide
+    // whether to open or keep our menu when native Start surfaces
+    static void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG, LONG, DWORD, DWORD);
 
-            if (wcscmp(className, L"Windows.UI.Core.CoreWindow") == 0) {
-                wchar_t title[256] = { 0 };
-                GetWindowTextW(hwnd, title, 256);
+    // Defined in MenuWindow.hpp: periodic guarantee sweep that hides any native
+    // Start / Search overlay, no matter which input path created it
+    static void CALLBACK NativeStartWatchdogTimer(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime);
+    static BOOL CALLBACK NativeStartWatchdogEnumProc(HWND hwnd, LPARAM lParam);
 
-                if (wcscmp(title, L"Search") == 0 || wcscmp(title, L"\x041F\x043E\x0438\x0441\x043A") == 0) {
-                    PostMessageW(g_hTargetWnd, WM_APP_CLOSE_MENU, 0, 0);
-                    return;
-                }
+    // Low-level hooks MUST live on a dedicated, otherwise-idle thread. When they
+    // share the UI thread, any heavy work there (GDI+ painting, the UIA start-button
+    // lookup, search-result handling) delays the hook callback past the system
+    // LowLevelHooksTimeout, and Windows then silently passes the input straight to
+    // the taskbar. That passthrough is exactly how the native Start menu kept
+    // leaking past our swallow on rapid clicks. An idle thread always answers the
+    // hook in time, so the Start button / Win key are blocked every single time.
+    // This thread handles ONLY the two low-level hooks: the foreground watcher
+    // (WinEventProc) was moved to the UI thread because its per-event process
+    // verification would otherwise delay these very callbacks.
+    static DWORD WINAPI HookThreadProc(LPVOID) {
+        g_hKeyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, g_hInst, 0);
+        g_hMouseHook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, g_hInst, 0);
 
-                if (wcscmp(title, L"Start") == 0 || wcscmp(title, L"\x041F\x0443\x0441\x043A") == 0) {
-                    ShowWindow(hwnd, SW_HIDE);
-                    PostMessageW(g_hTargetWnd, WM_APP_TOGGLE_MENU, 0, 0);
-                    return;
-                }
-            }
+        // The hook procs are dispatched through this loop, so it must keep pumping.
+        MSG msg;
+        while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
         }
+
+        // Unhook from the same thread that installed the hooks.
+        if (g_hKeyboardHook) { UnhookWindowsHookEx(g_hKeyboardHook); g_hKeyboardHook = nullptr; }
+        if (g_hMouseHook) { UnhookWindowsHookEx(g_hMouseHook); g_hMouseHook = nullptr; }
+        return 0;
     }
 
     static void Install(HWND targetWnd, HINSTANCE hInst) {
         g_hTargetWnd = targetWnd;
-        g_hKeyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, hInst, 0);
-        g_hMouseHook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, hInst, 0);
+        g_hInst = hInst;
+
+        // Resolve the Start button rectangle once here on the UI thread, where COM
+        // (UIA) is already initialized. The hook thread only ever reads the cached
+        // value, so it never performs the expensive UIA lookup on the hot path.
+        UpdateStartButtonRect();
+
+        g_hHookThread = CreateThread(nullptr, 0, HookThreadProc, nullptr, 0, &g_hookThreadId);
+
+        // The foreground watcher is installed from the UI thread (Install is called
+        // on it): WinEventProc performs process image queries per foreground change,
+        // and that work must never run on the hook thread. Event delivery is just a
+        // posted message to this thread's queue, and the TIMER_BLOCK_START watchdog
+        // is the guarantee layer underneath it.
         g_hWinEventHook = SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
             nullptr, WinEventProc, 0, 0,
-            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS
-        );
-        UpdateStartButtonRect();
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     }
 
     static void Uninstall() {
-        if (g_hKeyboardHook) { UnhookWindowsHookEx(g_hKeyboardHook); g_hKeyboardHook = nullptr; }
-        if (g_hMouseHook) { UnhookWindowsHookEx(g_hMouseHook); g_hMouseHook = nullptr; }
+        // WinEvent hook was installed on the calling (UI) thread, so unhook it here.
         if (g_hWinEventHook) { UnhookWinEvent(g_hWinEventHook); g_hWinEventHook = nullptr; }
+        if (g_hookThreadId) {
+            PostThreadMessageW(g_hookThreadId, WM_QUIT, 0, 0);
+        }
+        if (g_hHookThread) {
+            WaitForSingleObject(g_hHookThread, 3000);
+            CloseHandle(g_hHookThread);
+            g_hHookThread = nullptr;
+        }
+        g_hookThreadId = 0;
     }
 };

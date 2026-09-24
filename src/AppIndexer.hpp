@@ -12,11 +12,13 @@
 #include <unordered_map>
 #include <thread>
 #include <mutex>
+#include <memory>
 
 class IconCache {
 private:
     static inline std::unordered_map<std::wstring, HICON> s_extCache;
     static inline std::unordered_map<std::wstring, HICON> s_fileIconCache;
+    static inline std::unordered_map<std::wstring, HICON> s_shortcutIconCache;
     static inline std::mutex s_cacheMutex;
     static inline HICON s_defaultFolderIcon = nullptr;
     static inline HICON s_defaultFileIcon = nullptr;
@@ -80,6 +82,26 @@ public:
         size_t dotPos = norm.find_last_of(L'.');
         std::wstring ext = (dotPos != std::wstring::npos) ? norm.substr(dotPos) : L"";
         return GetExtensionIcon(ext);
+    }
+
+    // Icons referenced by .lnk shortcuts must be cached: ExtractIconExW creates a new
+    // HICON on every call and pinned items are reloaded on each menu open (leak source)
+    static HICON GetShortcutIcon(const std::wstring& iconPath, int iconIndex) {
+        std::wstring key = Config::ToLower(iconPath) + L"|" + std::to_wstring(iconIndex);
+        {
+            std::lock_guard<std::mutex> lock(s_cacheMutex);
+            auto it = s_shortcutIconCache.find(key);
+            if (it != s_shortcutIconCache.end()) {
+                return it->second;
+            }
+        }
+
+        HICON hExtracted = nullptr;
+        ExtractIconExW(iconPath.c_str(), iconIndex, &hExtracted, nullptr, 1);
+
+        std::lock_guard<std::mutex> lock(s_cacheMutex);
+        s_shortcutIconCache[key] = hExtracted;
+        return hExtracted;
     }
 };
 
@@ -151,9 +173,8 @@ public:
         }
 
         if (!iconPath.empty()) {
-            HICON hExtracted = nullptr;
-            ExtractIconExW(iconPath.c_str(), iconIndex, &hExtracted, nullptr, 1);
-            if (hExtracted) return hExtracted;
+            HICON hShortcutIcon = IconCache::GetShortcutIcon(iconPath, iconIndex);
+            if (hShortcutIcon) return hShortcutIcon;
         }
 
         if (ext == L".exe") {
@@ -551,11 +572,16 @@ public:
             std::vector<AppItem> frequentFolders = ScanFrequentFolders();
             std::vector<AppItem> userItems = ScanUserFilesAndFolders();
 
+            auto snapshot = std::make_shared<IndexSnapshot>();
+            snapshot->installedApps = std::move(apps);
+            snapshot->frequentFolders = std::move(frequentFolders);
+            snapshot->userFiles = std::move(userItems);
+
             {
+                // Publish the immutable snapshot under a short lock; search workers
+                // hold their own shared_ptr copy and iterate it without locking
                 std::lock_guard<std::mutex> lock(Config::g_indexMutex);
-                Config::g_cachedInstalledApps = std::move(apps);
-                Config::g_cachedFrequentFolders = std::move(frequentFolders);
-                Config::g_cachedUserFiles = std::move(userItems);
+                Config::g_indexSnapshot = std::move(snapshot);
                 Config::g_isIndexingComplete = true;
             }
 
@@ -611,74 +637,12 @@ public:
         return col[len2];
     }
 
-    static int CalculateMatchScore(const std::wstring& target, const std::wstring& rawQuery) {
-        if (rawQuery.empty()) return 100;
-
-        std::wstring lowerTarget = Config::ToLower(target);
-        std::wstring lowerQuery = Config::ToLower(rawQuery);
-
-        if (lowerTarget == lowerQuery) return 100;
-        if (lowerTarget.rfind(lowerQuery, 0) == 0) return 96;
-
-        size_t pos = lowerTarget.find(lowerQuery);
-        if (pos != std::wstring::npos) return 90 - (int)pos;
-
-        std::wstring convertedQuery = ConvertKeyboardLayout(lowerQuery);
-        if (convertedQuery != lowerQuery) {
-            if (lowerTarget == convertedQuery) return 98;
-            if (lowerTarget.rfind(convertedQuery, 0) == 0) return 85;
-            size_t cpos = lowerTarget.find(convertedQuery);
-            if (cpos != std::wstring::npos) return 80 - (int)cpos;
-        }
-
-        static const std::unordered_map<std::wstring, std::wstring> ruAliases = {
-            {L"дискорд", L"discord"},
-            {L"стим", L"steam"},
-            {L"спотифай", L"spotify"},
-            {L"лига", L"league"},
-            {L"навикат", L"navicat"},
-            {L"проводник", L"explorer"},
-            {L"блокнот", L"notepad"},
-            {L"калькулятор", L"calc"},
-            {L"терминал", L"terminal"},
-            {L"настройки", L"settings"},
-            {L"загрузки", L"downloads"},
-            {L"документы", L"documents"},
-            {L"музыка", L"music"},
-            {L"видео", L"videos"},
-            {L"картинки", L"pictures"},
-            {L"фото", L"pictures"},
-            {L"текст", L"txt"}
-        };
-
-        for (const auto& [ruWord, enWord] : ruAliases) {
-            if (lowerQuery.find(ruWord) != std::wstring::npos || ruWord.find(lowerQuery) != std::wstring::npos) {
-                if (lowerTarget.find(enWord) != std::wstring::npos) return 82;
-            }
-        }
-
-        std::wstring acronym = L"";
-        bool nextCap = true;
-        for (wchar_t c : target) {
-            if (iswspace(c) || c == L'-' || c == L'_') {
-                nextCap = true;
-            } else if (nextCap) {
-                acronym += towlower(c);
-                nextCap = false;
-            }
-        }
-        if (acronym.find(lowerQuery) != std::wstring::npos) return 75;
-
-        if (lowerQuery.length() >= 4) {
-            int dist = LevenshteinDistance(lowerTarget.substr(0, (std::min)(lowerTarget.length(), lowerQuery.length())), lowerQuery);
-            if (dist <= 2) return 60 - (dist * 10);
-        }
-
-        return 0;
-    }
-
-    // Zero-allocation, high-speed matching function
-    static int CalculateItemScoreFast(const AppItem& item, const std::wstring& lowerQuery, const std::vector<std::wstring>& tokens) {
+    // High-speed matching that relies on query variants precomputed once per search
+    static int CalculateItemScoreFast(const AppItem& item,
+                                      const std::wstring& lowerQuery,
+                                      const std::wstring& convertedQuery,
+                                      const std::vector<std::wstring>& tokens,
+                                      const std::vector<std::wstring>& convertedTokens) {
         if (lowerQuery.empty()) return 100;
 
         // 1. Exact match on item name
@@ -698,21 +662,19 @@ public:
         }
 
         // 4. Converted keyboard layout match on item name
-        std::wstring converted = ConvertKeyboardLayout(lowerQuery);
-        if (converted != lowerQuery) {
-            if (item.lowerName == converted) return 98;
-            if (item.lowerName.rfind(converted, 0) == 0) return 94;
-            size_t cpos = item.lowerName.find(converted);
+        if (convertedQuery != lowerQuery) {
+            if (item.lowerName == convertedQuery) return 98;
+            if (item.lowerName.rfind(convertedQuery, 0) == 0) return 94;
+            size_t cpos = item.lowerName.find(convertedQuery);
             if (cpos != std::wstring::npos) return 88 - (int)(std::min)((size_t)15, cpos);
         }
 
-        // 5. Multi-token match without string concatenation allocations
+        // 5. Multi-token match without per-item string conversions
         if (tokens.size() > 1) {
             bool allInName = true;
-            for (const auto& token : tokens) {
-                if (item.lowerName.find(token) == std::wstring::npos) {
-                    std::wstring convTok = ConvertKeyboardLayout(token);
-                    if (item.lowerName.find(convTok) == std::wstring::npos) {
+            for (size_t t = 0; t < tokens.size(); ++t) {
+                if (item.lowerName.find(tokens[t]) == std::wstring::npos) {
+                    if (convertedTokens[t].empty() || item.lowerName.find(convertedTokens[t]) == std::wstring::npos) {
                         allInName = false;
                         break;
                     }
@@ -723,15 +685,14 @@ public:
             }
 
             bool allFound = true;
-            for (const auto& token : tokens) {
-                bool inThis = (item.lowerName.find(token) != std::wstring::npos) ||
-                              (!item.lowerExt.empty() && item.lowerExt.find(token) != std::wstring::npos) ||
-                              (!item.lowerTarget.empty() && item.lowerTarget.find(token) != std::wstring::npos);
-                if (!inThis) {
-                    std::wstring convTok = ConvertKeyboardLayout(token);
-                    inThis = (item.lowerName.find(convTok) != std::wstring::npos) ||
-                             (!item.lowerExt.empty() && item.lowerExt.find(convTok) != std::wstring::npos) ||
-                             (!item.lowerTarget.empty() && item.lowerTarget.find(convTok) != std::wstring::npos);
+            for (size_t t = 0; t < tokens.size(); ++t) {
+                bool inThis = (item.lowerName.find(tokens[t]) != std::wstring::npos) ||
+                              (!item.lowerExt.empty() && item.lowerExt.find(tokens[t]) != std::wstring::npos) ||
+                              (!item.lowerTarget.empty() && item.lowerTarget.find(tokens[t]) != std::wstring::npos);
+                if (!inThis && !convertedTokens[t].empty()) {
+                    inThis = (item.lowerName.find(convertedTokens[t]) != std::wstring::npos) ||
+                             (!item.lowerExt.empty() && item.lowerExt.find(convertedTokens[t]) != std::wstring::npos) ||
+                             (!item.lowerTarget.empty() && item.lowerTarget.find(convertedTokens[t]) != std::wstring::npos);
                 }
                 if (!inThis) {
                     allFound = false;

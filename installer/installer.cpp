@@ -111,7 +111,7 @@ static void RegisterUninstallEntry(const std::wstring& installDir, const std::ws
     if (RegCreateKeyExW(HKEY_CURRENT_USER, subKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
         std::wstring uninstallerCmd = L"\"" + installDir + L"\\Uninstall.exe\" --uninstall";
         const wchar_t* displayName = L"Perdanga11";
-        const wchar_t* displayVer = L"1.0.0";
+        const wchar_t* displayVer = L"1.1";
         const wchar_t* publisher = L"Perdanga";
 
         RegSetValueExW(hKey, L"DisplayName", 0, REG_SZ, (const BYTE*)displayName, (DWORD)((wcslen(displayName) + 1) * sizeof(wchar_t)));
@@ -160,8 +160,13 @@ static void PerformUninstall() {
         CoTaskMemFree(pPrograms);
     }
 
-    // 4. Remove shell context menu entries
+    // 4. Remove shell context menu entries (current and legacy verb names)
     const wchar_t* shellKeys[] = {
+        L"Software\\Classes\\exefile\\shell\\Perdanga11.Pin",
+        L"Software\\Classes\\lnkfile\\shell\\Perdanga11.Pin",
+        L"Software\\Classes\\*\\shell\\Perdanga11.Pin",
+        L"Software\\Classes\\Directory\\shell\\Perdanga11.Pin",
+        L"Software\\Classes\\Folder\\shell\\Perdanga11.Pin",
         L"Software\\Classes\\exefile\\shell\\PinToPerdanga11",
         L"Software\\Classes\\lnkfile\\shell\\PinToPerdanga11",
         L"Software\\Classes\\Directory\\shell\\PinToPerdanga11",
@@ -169,6 +174,15 @@ static void PerformUninstall() {
     };
     for (const wchar_t* k : shellKeys) {
         RegDeleteTreeW(HKEY_CURRENT_USER, k);
+    }
+
+    // 4.1. Remove the SendTo shortcut (registered by the app itself, EN and RU names)
+    PWSTR pSendTo = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_SendTo, 0, nullptr, &pSendTo)) && pSendTo) {
+        std::wstring sendToDir = pSendTo;
+        CoTaskMemFree(pSendTo);
+        DeleteFileW((sendToDir + L"\\Pin to Perdanga11.lnk").c_str());
+        DeleteFileW((sendToDir + L"\\\x0417\x0430\x043A\x0440\x0435\x043F\x0438\x0442\x044C \x0432 Perdanga11.lnk").c_str());
     }
 
     // 5. Unregister from Windows Settings -> Apps
