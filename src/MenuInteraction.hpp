@@ -104,14 +104,12 @@ public:
         ShellExecuteW(nullptr, asAdmin ? L"runas" : L"open", item.target.c_str(), item.arguments.c_str(), nullptr, SW_SHOWNORMAL);
     }
 
-    // Opens the actual directory where the real binary is installed, resolving .lnk shortcuts
     static void OpenItemLocation(const AppItem& item) {
         std::wstring target = item.target;
         if (target.length() >= 2 && target.front() == L'"' && target.back() == L'"') {
             target = target.substr(1, target.length() - 2);
         }
 
-        // If it is a shortcut (.lnk), resolve to the actual target file/binary
         size_t dotPos = target.find_last_of(L'.');
         if (dotPos != std::wstring::npos && _wcsicmp(target.c_str() + dotPos, L".lnk") == 0) {
             std::wstring iconPath;
@@ -123,8 +121,6 @@ public:
         }
 
         target = Config::ResolveAppPath(target);
-
-        // Open Explorer and select the real installed program file
         std::wstring param = L"/select,\"" + target + L"\"";
         ShellExecuteW(nullptr, L"open", L"explorer.exe", param.c_str(), nullptr, SW_SHOWNORMAL);
     }
@@ -389,7 +385,6 @@ public:
         MSG msg;
         while (IsWindow(hDlg)) {
             if (!GetMessageW(&msg, nullptr, 0, 0)) {
-                // Do not swallow WM_QUIT: repost it so the main loop can exit
                 PostQuitMessage((int)msg.wParam);
                 break;
             }
@@ -467,7 +462,7 @@ public:
 
         HMENU hMenu = CreatePopupMenu();
         const wchar_t* addAppText = Config::IsRussian() ? L"\x0417\x0430\x043A\x0440\x0435\x043F\x0438\x0442\x044C \x043F\x0440\x043E\x0433\x0440\x0430\x043C\x043C\x0443/\x0444\x0430\x0439\x043B..." : L"Pin application/file...";
-        const wchar_t* addFolderText = Config::IsRussian() ? L"\x0417\x0430\x043A\x0440\x0435\x043F\x0438\x0442\x044C \x043F\x0430\x043F\x043A\x0433..." : L"Pin folder...";
+        const wchar_t* addFolderText = Config::IsRussian() ? L"\x0417\x0430\x043A\x0440\x0435\x043F\x0438\x0442\x044C \x043F\x0430\x043F\x043A\x0443..." : L"Pin folder...";
 
         AppendMenuW(hMenu, MF_STRING, ID_MENU_PIN_CUSTOM_FILE, addAppText);
         AppendMenuW(hMenu, MF_STRING, ID_MENU_PIN_CUSTOM_DIR, addFolderText);

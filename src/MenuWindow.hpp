@@ -49,11 +49,6 @@ public:
                 SetWindowSubclass(g_hSearchEdit, SearchEditSubclass, 0, 0);
 
                 SetTimer(hwnd, TIMER_UPDATE_RECT, 2500, nullptr);
-
-                // Guarantee layer for the "native Start must never appear"
-                // invariant: even if every event-based path misses (hook timeout,
-                // race, touch input), this sweep hides any visible native Start /
-                // Search overlay within one tick.
                 SetTimer(hwnd, TIMER_BLOCK_START, 100, Hooks::NativeStartWatchdogTimer);
                 return 0;
             }
@@ -63,12 +58,9 @@ public:
             case WM_THEMECHANGED: {
                 Config::UpdateThemeCache();
                 UpdateThemeAttributes(hwnd);
+                Hooks::UpdateStartButtonRect();
+                SetTimer(hwnd, TIMER_RECT_DEBOUNCE, 200, nullptr);
                 InvalidateRect(hwnd, nullptr, TRUE);
-                // Taskbar geometry (size, alignment, auto-hide, monitor layout) may
-                // have changed. Re-resolve the Start button rect soon so clicks on it
-                // are never missed while the cached rect is stale. Debounced because
-                // WM_SETTINGCHANGE can arrive in bursts.
-                SetTimer(hwnd, TIMER_RECT_DEBOUNCE, 250, nullptr);
                 return 0;
             }
 
@@ -187,9 +179,6 @@ public:
                 return 0;
             }
 
-            // Idempotent response to a suppressed native Start menu: open ours only
-            // when it is not open yet. User-driven toggles keep their flip semantics
-            // via WM_APP_TOGGLE_MENU, so a double-post of this message is harmless.
             case WM_APP_NATIVE_START_OPENED: {
                 if (!g_isVisible) {
                     Toggle(true);
@@ -207,7 +196,6 @@ public:
                 return 0;
             }
 
-            // Dismiss menu when losing focus, unless an app was just launched via Shift+Click
             case WM_ACTIVATE: {
                 if (LOWORD(wParam) == WA_INACTIVE && !g_isDragging && !MenuInteraction::g_isModalDialogOpen) {
                     if (g_suppressCloseOnDeactivate) {
@@ -258,7 +246,7 @@ public:
                     GetWindowTextW(g_hSearchEdit, searchContent, 64);
 
                     int relY = y - GRID_START_Y + g_scrollY;
-                    if (wcslen(searchContent) == 0 && x >= GRID_START_X && x < GRID_START_X + (GRID_COLS * CELL_WIDTH) && relY >= 0 && y < (MENU_HEIGHT - 52)) {
+                    if (searchContent[0] == L'\0' && x >= GRID_START_X && x < GRID_START_X + (GRID_COLS * CELL_WIDTH) && relY >= 0 && y < (MENU_HEIGHT - 52)) {
                         int col = (x - GRID_START_X) / CELL_WIDTH;
                         int row = relY / CELL_HEIGHT;
                         int idx = row * GRID_COLS + col;
@@ -403,7 +391,6 @@ public:
                 return 0;
             }
 
-            // Middle Click: Launches app and keeps menu open (convenient alternative)
             case WM_MBUTTONUP: {
                 int x = GET_X_LPARAM(lParam);
                 int y = GET_Y_LPARAM(lParam);
@@ -556,7 +543,6 @@ public:
                 if (g_isDragging) {
                     bool reordered = false;
                     {
-                        // Tab items are shared with search workers: reorder under the index lock
                         std::lock_guard<std::mutex> lock(Config::g_indexMutex);
                         if (!Config::g_tabs.empty()) {
                             auto& activeTab = Config::GetActiveTab();
@@ -637,7 +623,6 @@ public:
                     return 0;
                 }
 
-                // Single Click vs Shift+Click logic for footer buttons
                 bool isShiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
 
                 if (PtInRect(&g_settingsButtonRect, pt)) {
@@ -679,8 +664,6 @@ public:
                     return 0;
                 }
 
-                // Normal Click: Launches and closes menu immediately
-                // Shift + Click: Launches program, flashes tile, and keeps menu open for consecutive launches
                 if (g_hoveredIndex >= 0 && g_hoveredIndex < (int)g_displayItems.size()) {
                     MenuInteraction::ExecuteApp(g_displayItems[g_hoveredIndex], false);
                     if (isShiftHeld) {
@@ -720,7 +703,7 @@ public:
 
                 wchar_t searchContent[64] = { 0 };
                 GetWindowTextW(g_hSearchEdit, searchContent, 64);
-                MenuRenderer::DrawSearchBar(g, rc, wcslen(searchContent) > 0, GetFocus() == g_hSearchEdit);
+                MenuRenderer::DrawSearchBar(g, rc, searchContent[0] != L'\0', GetFocus() == g_hSearchEdit);
 
                 RecalculateTabLayout();
 
@@ -832,8 +815,6 @@ public:
 inline void CALLBACK Hooks::WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG, LONG, DWORD, DWORD) {
     if (event != EVENT_SYSTEM_FOREGROUND || !hwnd || hwnd == g_hTargetWnd) return;
 
-    // Native Start must never stay visible while Perdanga11 is running:
-    // hide it immediately and open our menu instead (if it is not open yet)
     if (IsNativeStartWindow(hwnd)) {
         ShowWindow(hwnd, SW_HIDE);
         if (!MenuWindow::g_isVisible) {
@@ -842,7 +823,6 @@ inline void CALLBACK Hooks::WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, 
         return;
     }
 
-    // Native Search took the foreground: close our menu so windows never overlap
     if (IsNativeSearchWindow(hwnd)) {
         if (MenuWindow::g_isVisible) {
             PostMessageW(g_hTargetWnd, WM_APP_CLOSE_MENU, 0, 0);
@@ -850,7 +830,6 @@ inline void CALLBACK Hooks::WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, 
         return;
     }
 
-    // Fallback for older builds: detect overlays by window class and title
     wchar_t className[256] = { 0 };
     GetClassNameW(hwnd, className, 256);
     if (wcscmp(className, L"Windows.UI.Core.CoreWindow") != 0) return;
@@ -873,13 +852,6 @@ inline void CALLBACK Hooks::WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, 
     }
 }
 
-// Guarantee layer for the "native Start must never appear" invariant. The
-// foreground watcher above is only the fast path: this sweep hides any visible
-// native Start / Search overlay no matter how it was opened (hook timeout, race
-// between click interception and shell activation, touch input). The expensive
-// per-window process verification only runs for the rare visible
-// Windows.UI.Core.CoreWindow candidates, so the steady-state cost of the tick
-// is a single EnumWindows pass over the visible top-level windows.
 inline void CALLBACK Hooks::NativeStartWatchdogTimer(HWND, UINT, UINT_PTR, DWORD) {
     EnumWindows(NativeStartWatchdogEnumProc, 0);
 }
@@ -914,7 +886,6 @@ inline LRESULT CALLBACK Hooks::LowLevelMouseProc(int nCode, WPARAM wParam, LPARA
         MSLLHOOKSTRUCT* pMouse = (MSLLHOOKSTRUCT*)lParam;
         POINT pt = pMouse->pt;
 
-        // Dismiss immediately if user clicks anywhere outside the Start menu window
         if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN || wParam == WM_NCLBUTTONDOWN || wParam == WM_NCRBUTTONDOWN) {
             if (MenuWindow::g_isVisible) {
                 if (MenuInteraction::g_isModalDialogOpen) {
@@ -929,13 +900,11 @@ inline LRESULT CALLBACK Hooks::LowLevelMouseProc(int nCode, WPARAM wParam, LPARA
                     RECT startHit = g_startButtonRect;
                     startHit.left -= 4;
                     startHit.top -= 4;
+                    startHit.right += 4;
                     startHit.bottom += 4;
 
                     if (PtInRect(&startHit, pt) && IsCursorDirectlyOnTaskbar(pt)) {
                         g_mouseClickIntercepted = true;
-                        // Post, never call CloseImmediately() directly: this runs on the
-                        // hook thread and a synchronous UI call would block on the busy
-                        // UI thread, re-triggering the very hook timeout we removed.
                         PostMessageW(g_hTargetWnd, WM_APP_CLOSE_MENU, 0, 0);
                         return 1;
                     }
@@ -949,6 +918,7 @@ inline LRESULT CALLBACK Hooks::LowLevelMouseProc(int nCode, WPARAM wParam, LPARA
             RECT hitArea = g_startButtonRect;
             hitArea.left -= 4;
             hitArea.top -= 4;
+            hitArea.right += 4;
             hitArea.bottom += 4;
 
             if (wParam == WM_LBUTTONDOWN || wParam == WM_NCLBUTTONDOWN) {

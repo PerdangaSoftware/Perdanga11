@@ -49,13 +49,13 @@ public:
     static inline DWORD g_animStartTime = 0;
     static inline int g_targetX = 0;
     static inline int g_targetY = 0;
+    static inline int g_animOffsetX = 0;
+    static inline int g_animOffsetY = 20;
 
-    // Visual feedback and focus management for Shift+Click multi-launching
     static inline int g_justLaunchedIndex = -1;
     static inline DWORD g_justLaunchedTime = 0;
     static inline bool g_suppressCloseOnDeactivate = false;
 
-    // Window dimensions
     static const inline int MENU_WIDTH = 740;
     static const inline int MENU_HEIGHT = 720;
     static const inline int ANIM_DURATION = 190;
@@ -219,7 +219,7 @@ public:
                 } else {
                     wchar_t query[256];
                     GetWindowTextW(hWnd, query, 256);
-                    if (wcslen(query) > 0) {
+                    if (query[0] != L'\0') {
                         ShellExecuteW(nullptr, L"open", query, nullptr, nullptr, SW_SHOWNORMAL);
                         CloseImmediately();
                     }
@@ -297,7 +297,6 @@ public:
 
     static void ReloadPinnedData() {
         {
-            // Tab items are shared with search workers: mutate them under the index lock
             std::lock_guard<std::mutex> lock(Config::g_indexMutex);
             for (auto& tab : Config::g_tabs) {
                 tab.items = Config::LoadTabItems(tab);
@@ -343,9 +342,6 @@ public:
 
         std::thread([currentGen, sQuery, targetWnd]() {
             std::wstring lowerQuery = Config::ToLower(sQuery);
-
-            // Convert the query (and every token) once per search instead of once
-            // per candidate item: this used to allocate inside the scoring hot loop
             std::wstring convertedQuery = AppIndexer::ConvertKeyboardLayout(lowerQuery);
 
             std::vector<std::wstring> tokens;
@@ -362,8 +358,6 @@ public:
                 convertedTokens.push_back(convToken == token ? std::wstring() : convToken);
             }
 
-            // Grab an immutable snapshot of the index and a copy of pinned tab items
-            // under a short lock, then score everything without holding the mutex
             std::shared_ptr<const IndexSnapshot> snap;
             std::vector<AppItem> pinnedItems;
             {
@@ -440,8 +434,9 @@ public:
 
     static void Toggle(bool show) {
         if (show) {
-            // Hide native Start / Search overlays first so they never overlap our menu
             Hooks::DismissNativeShellOverlays();
+            Hooks::UpdateStartButtonRect();
+
             MenuInteraction::g_isPowerMenuOpen = false;
             g_currentMode = MODE_TABS;
             g_scrollY = 0;
@@ -453,11 +448,104 @@ public:
             ReloadPinnedData();
             SetWindowTextW(g_hSearchEdit, L"");
 
-            RECT workArea;
-            SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
+            POINT ptAnchor;
+            if ((Hooks::g_startButtonRect.right - Hooks::g_startButtonRect.left) > 0 &&
+                (Hooks::g_startButtonRect.bottom - Hooks::g_startButtonRect.top) > 0) {
+                ptAnchor.x = (Hooks::g_startButtonRect.left + Hooks::g_startButtonRect.right) / 2;
+                ptAnchor.y = (Hooks::g_startButtonRect.top + Hooks::g_startButtonRect.bottom) / 2;
+            } else {
+                GetCursorPos(&ptAnchor);
+            }
 
-            g_targetX = workArea.left + ((workArea.right - workArea.left) - MENU_WIDTH) / 2;
-            g_targetY = workArea.bottom - MENU_HEIGHT - 14;
+            HMONITOR hMon = MonitorFromPoint(ptAnchor, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO mi = { sizeof(MONITORINFO) };
+            RECT workArea;
+            if (GetMonitorInfoW(hMon, &mi)) {
+                workArea = mi.rcWork;
+            } else {
+                SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
+            }
+
+            const int margin = 12;
+            int targetX = 0;
+            int targetY = 0;
+            int animOffX = 0;
+            int animOffY = 0;
+
+            UINT edge = Hooks::g_taskbarEdge;
+            DWORD alignment = Hooks::g_taskbarAlignment;
+
+            switch (edge) {
+                case ABE_TOP: {
+                    targetY = workArea.top + margin;
+                    animOffX = 0;
+                    animOffY = -20;
+
+                    if (alignment == 1) {
+                        targetX = workArea.left + ((workArea.right - workArea.left) - MENU_WIDTH) / 2;
+                    } else {
+                        int desiredX = (Hooks::g_startButtonRect.right > Hooks::g_startButtonRect.left) 
+                            ? Hooks::g_startButtonRect.left 
+                            : workArea.left + margin;
+                        targetX = (std::max)((int)workArea.left + margin, (std::min)((int)workArea.right - MENU_WIDTH - margin, desiredX));
+                    }
+                    break;
+                }
+
+                case ABE_LEFT: {
+                    targetX = workArea.left + margin;
+                    animOffX = -20;
+                    animOffY = 0;
+
+                    if (alignment == 1) {
+                        targetY = workArea.top + ((workArea.bottom - workArea.top) - MENU_HEIGHT) / 2;
+                    } else {
+                        int desiredY = (Hooks::g_startButtonRect.bottom > Hooks::g_startButtonRect.top) 
+                            ? Hooks::g_startButtonRect.top 
+                            : workArea.top + margin;
+                        targetY = (std::max)((int)workArea.top + margin, (std::min)((int)workArea.bottom - MENU_HEIGHT - margin, desiredY));
+                    }
+                    break;
+                }
+
+                case ABE_RIGHT: {
+                    targetX = workArea.right - MENU_WIDTH - margin;
+                    animOffX = 20;
+                    animOffY = 0;
+
+                    if (alignment == 1) {
+                        targetY = workArea.top + ((workArea.bottom - workArea.top) - MENU_HEIGHT) / 2;
+                    } else {
+                        int desiredY = (Hooks::g_startButtonRect.bottom > Hooks::g_startButtonRect.top) 
+                            ? Hooks::g_startButtonRect.top 
+                            : workArea.top + margin;
+                        targetY = (std::max)((int)workArea.top + margin, (std::min)((int)workArea.bottom - MENU_HEIGHT - margin, desiredY));
+                    }
+                    break;
+                }
+
+                case ABE_BOTTOM:
+                default: {
+                    targetY = workArea.bottom - MENU_HEIGHT - margin;
+                    animOffX = 0;
+                    animOffY = 20;
+
+                    if (alignment == 1) {
+                        targetX = workArea.left + ((workArea.right - workArea.left) - MENU_WIDTH) / 2;
+                    } else {
+                        int desiredX = (Hooks::g_startButtonRect.right > Hooks::g_startButtonRect.left) 
+                            ? Hooks::g_startButtonRect.left 
+                            : workArea.left + margin;
+                        targetX = (std::max)((int)workArea.left + margin, (std::min)((int)workArea.right - MENU_WIDTH - margin, desiredX));
+                    }
+                    break;
+                }
+            }
+
+            g_targetX = targetX;
+            g_targetY = targetY;
+            g_animOffsetX = animOffX;
+            g_animOffsetY = animOffY;
 
             g_animatingIn = true;
             g_isAnimating = true;
@@ -465,7 +553,7 @@ public:
             g_openTimestamp = GetTickCount();
 
             SetLayeredWindowAttributes(g_hWnd, 0, 0, LWA_ALPHA);
-            SetWindowPos(g_hWnd, HWND_TOPMOST, g_targetX, g_targetY + 20, MENU_WIDTH, MENU_HEIGHT, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+            SetWindowPos(g_hWnd, HWND_TOPMOST, g_targetX + g_animOffsetX, g_targetY + g_animOffsetY, MENU_WIDTH, MENU_HEIGHT, SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
             SetTimer(g_hWnd, TIMER_ANIMATION, 14, nullptr);
 
@@ -507,12 +595,14 @@ public:
         }
 
         float ease = 1.0f - powf(1.0f - t, 4.0f);
+        float invEase = 1.0f - ease;
 
         if (g_animatingIn) {
             BYTE alpha = (BYTE)(ease * 255.0f);
-            int currentY = g_targetY + (int)((1.0f - ease) * 20.0f);
+            int currentX = g_targetX + (int)(invEase * (float)g_animOffsetX);
+            int currentY = g_targetY + (int)(invEase * (float)g_animOffsetY);
             SetLayeredWindowAttributes(g_hWnd, 0, alpha, LWA_ALPHA);
-            SetWindowPos(g_hWnd, HWND_TOPMOST, g_targetX, currentY, MENU_WIDTH, MENU_HEIGHT, SWP_NOACTIVATE | SWP_NOZORDER);
+            SetWindowPos(g_hWnd, HWND_TOPMOST, currentX, currentY, MENU_WIDTH, MENU_HEIGHT, SWP_NOACTIVATE | SWP_NOZORDER);
         } else {
             CloseImmediately();
         }

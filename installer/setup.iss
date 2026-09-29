@@ -1,7 +1,7 @@
 #define MyAppName "Perdanga11"
-#define MyAppVersion "1.1"
+#define MyAppVersion "1.3"
 #define MyAppPublisher "Perdanga Software"
-#define MyAppURL "https://gitlab.com/perdanga/perdanga11"
+#define MyAppURL "https://github.com/PerdangaSoftware/Perdanga11"
 #define MyAppExeName "Perdanga11.exe"
 
 [Setup]
@@ -12,7 +12,6 @@ AppPublisher={#MyAppPublisher}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 
-; Directory selection page enabled
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableDirPage=no
@@ -22,7 +21,6 @@ OutputDir=..\dist
 OutputBaseFilename=Perdanga11_Setup
 SetupIconFile=..\assets\ico\perdanga11.ico
 
-; Custom artwork generated from assets\logo\perdanga11.png
 WizardImageFile=..\assets\logo\wizard_banner.bmp
 WizardSmallImageFile=..\assets\logo\logo_small.bmp
 
@@ -32,7 +30,6 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
 
-; Language selection dialog
 ShowLanguageDialog=yes
 LanguageDetectionMethod=none
 UsePreviousLanguage=no
@@ -42,19 +39,17 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
 [CustomMessages]
-; English
 english.CreateDesktopIcon=Create a desktop shortcut
 english.AutoStartTask=Start Perdanga11 automatically when Windows starts
-english.VisitGitLabRun=View source code on GitLab
+english.VisitGitHubRun=View source code on GitHub
 english.DevelopedBy=Developed by Perdanga Software
-english.GitLabLink=GitLab
+english.GitHubLink=GitHub
 
-; Russian
 russian.CreateDesktopIcon=Создать ярлык на Рабочем столе
 russian.AutoStartTask=Запускать Perdanga11 автоматически при входе в Windows
-russian.VisitGitLabRun=Посетить репозиторий проекта
+russian.VisitGitHubRun=Посетить страницу проекта на GitHub
 russian.DevelopedBy=Разработано Perdanga Software
-russian.GitLabLink=Репозиторий
+russian.GitHubLink=GitHub
 
 [Messages]
 english.FinishedHeadingLabel=Perdanga Forever!
@@ -78,28 +73,25 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilen
 Name: "{autostartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\ico\perdanga11.ico"; Tasks: autostart
 
 [Run]
-; Run as non-elevated original user so UIPI does not block shell context menu messages
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent runasoriginaluser
-Filename: "{#MyAppURL}"; Description: "{cm:VisitGitLabRun}"; Flags: shellexec postinstall unchecked
+Filename: "{#MyAppURL}"; Description: "{cm:VisitGitHubRun}"; Flags: shellexec postinstall unchecked
 
 [Code]
-// Fluent Midnight Navy & Electric Azure Palette (Delphi BGR format)
 const
-  COLOR_BG_DARK    = $280C03; // Deep Midnight Navy background (#030C28)
-  COLOR_SURFACE    = $361507; // Rich Deep Sapphire Surface (#071536)
-  COLOR_ACCENT     = $FFA21E; // Vibrant Electric Azure Blue (#1EA2FF)
-  COLOR_SAGE       = $FFD0B0; // Soft Ice Blue Subtext (#B0D0FF)
-  COLOR_TEXT_WHITE = $FFFFFF; // Crisp Pure White (#FFFFFF)
-  COLOR_MUTED      = $A88B78; // Subtle Slate Blue-Gray (#788BA8)
+  COLOR_BG_DARK    = $280C03;
+  COLOR_SURFACE    = $361507;
+  COLOR_ACCENT     = $FFA21E;
+  COLOR_SAGE       = $FFD0B0;
+  COLOR_TEXT_WHITE = $FFFFFF;
+  COLOR_MUTED      = $A88B78;
 
-procedure GitLabLabelOnClick(Sender: TObject);
+procedure GitHubLabelOnClick(Sender: TObject);
 var
   ErrorCode: Integer;
 begin
   ShellExec('open', '{#MyAppURL}', '', '', SW_SHOWNORMAL, ewNoWait, ErrorCode);
 end;
 
-// Terminate running instance before installing
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
@@ -109,7 +101,6 @@ begin
   Result := '';
 end;
 
-// Terminate running instance before uninstalling
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   ResultCode: Integer;
@@ -196,7 +187,7 @@ end;
 
 procedure InitializeWizard();
 var
-  DevLabel, Sep1Label, GitLabLabel: TLabel;
+  DevLabel, Sep1Label, GitHubLabel: TLabel;
 begin
   ApplyCustomArtworkTheme();
 
@@ -216,14 +207,14 @@ begin
   Sep1Label.Font.Color := COLOR_MUTED;
   Sep1Label.Font.Size := 8;
 
-  GitLabLabel := TLabel.Create(WizardForm);
-  GitLabLabel.Parent := WizardForm;
-  GitLabLabel.Left := Sep1Label.Left + Sep1Label.Width + ScaleX(6);
-  GitLabLabel.Top := DevLabel.Top;
-  GitLabLabel.Caption := ExpandConstant('{cm:GitLabLink}');
-  GitLabLabel.Cursor := crHand;
-  GitLabLabel.Font.Color := COLOR_ACCENT;
-  GitLabLabel.Font.Style := [fsUnderline];
-  GitLabLabel.Font.Size := 8;
-  GitLabLabel.OnClick := @GitLabLabelOnClick;
+  GitHubLabel := TLabel.Create(WizardForm);
+  GitHubLabel.Parent := WizardForm;
+  GitHubLabel.Left := Sep1Label.Left + Sep1Label.Width + ScaleX(6);
+  GitHubLabel.Top := DevLabel.Top;
+  GitHubLabel.Caption := ExpandConstant('{cm:GitHubLink}');
+  GitHubLabel.Cursor := crHand;
+  GitHubLabel.Font.Color := COLOR_ACCENT;
+  GitHubLabel.Font.Style := [fsUnderline];
+  GitHubLabel.Font.Size := 8;
+  GitHubLabel.OnClick := @GitHubLabelOnClick;
 end;

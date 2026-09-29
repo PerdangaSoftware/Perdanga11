@@ -360,7 +360,6 @@ public:
         g.DrawString(hint, -1, g_pHintFont, label2, &centerFormat, &hintBrush);
     }
 
-    // Grid rendering with tactile launch flash and clean 2-line clamping
     static void DrawGrid(Gdiplus::Graphics& g, HDC memDC, const RECT& rc,
                          const std::vector<AppItem>& items,
                          int gridStartX, int gridStartY, int gridCols, int cellWidth, int cellHeight,
@@ -413,7 +412,6 @@ public:
                 g.FillPath(&glowBrush, &targetGlow);
                 g.DrawPath(&glowPen, &targetGlow);
             } else if ((int)i == justLaunchedIdx && (now - justLaunchedTime < 500)) {
-                // Tactile launch flash feedback
                 Gdiplus::GraphicsPath launchPath;
                 AddRoundedRectToPath(launchPath, tileRect, 9.0f);
                 Gdiplus::SolidBrush flashBg(Gdiplus::Color(65, 0, 120, 215));
@@ -450,7 +448,6 @@ public:
                 }
             }
 
-            // Draw crisp 32x32 icon at exact 1:1 pixel mapping
             if (items[i].hIcon) {
                 int iconX = tileLeft + (cellWidth - 32) / 2;
                 int iconY = tileTop + 8;
@@ -460,7 +457,6 @@ public:
             bool isItemHovered = ((int)i == hoveredIndex && !isDragging);
             Gdiplus::Color labelColor = isItemHovered ? Gdiplus::Color(255, 255, 255, 255) : GetTextPrimaryColor();
 
-            // Height = 38.0f: perfectly accommodates exactly two lines of text with clean ellipsis
             Gdiplus::RectF labelRect((float)tileLeft + 4.0f, (float)tileTop + 44.0f, (float)cellWidth - 8.0f, 38.0f);
             Gdiplus::SolidBrush labelBrush(labelColor);
             g.DrawString(items[i].name.c_str(), -1, g_pTileFont, labelRect, &tileFormat, &labelBrush);

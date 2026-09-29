@@ -35,19 +35,17 @@
 #include "MenuInteraction.hpp"
 #include "MenuWindow.hpp"
 
-#define WM_TRAYICON (WM_USER + 1)
-#define ID_TRAY_EXIT 2001
-#define ID_TRAY_AUTOSTART 2002
+#define WM_TRAYICON         (WM_USER + 1)
+#define ID_TRAY_EXIT        2001
+#define ID_TRAY_AUTOSTART   2002
 #define ID_TRAY_OPEN_CONFIG 2003
 
 #ifndef MSGFLT_ALLOW
 #define MSGFLT_ALLOW 1
 #endif
 
-NOTIFYICONDATAW g_nid = { 0 };
+static NOTIFYICONDATAW g_nid = { 0 };
 
-// Allow non-elevated Explorer context menu invocations to post messages through UIPI.
-// Scoped to our window only, instead of loosening the filter for the whole process
 static void AllowCrossIntegrityMessages(HWND hwnd) {
     typedef BOOL(WINAPI* PFN_ChangeWindowMessageFilterEx)(HWND, UINT, DWORD, PVOID);
     HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
@@ -122,19 +120,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         std::wstring targetPath = argv[2];
         LocalFree(argv);
 
-        // Strip quotes if present
         if (targetPath.length() >= 2 && targetPath.front() == L'"' && targetPath.back() == L'"') {
             targetPath = targetPath.substr(1, targetPath.length() - 2);
         }
 
-        // Clean trailing slashes
         while (targetPath.length() > 3 && (targetPath.back() == L'\\' || targetPath.back() == L'/')) {
             targetPath.pop_back();
         }
 
-        // Silently remove Zone.Identifier alternate stream so the file never triggers execution warnings
-        std::wstring zoneStream = targetPath + L":Zone.Identifier";
-        DeleteFileW(zoneStream.c_str());
+        DeleteFileW((targetPath + L":Zone.Identifier").c_str());
 
         size_t lastSlash = targetPath.find_last_of(L"\\/");
         std::wstring name = (lastSlash != std::wstring::npos) ? targetPath.substr(lastSlash + 1) : targetPath;
@@ -177,17 +171,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     ULONG_PTR gdiplusToken = 0;
     Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
 
-    // Register correct shell context menu entries
     Config::RegisterShellContextMenu();
 
     HWND hMainWnd = MenuWindow::Create(hInstance);
-
-    // Let a non-elevated "--pin" invocation post our custom messages through UIPI
     AllowCrossIntegrityMessages(hMainWnd);
-
     Config::StartAsyncIndexing(hMainWnd);
 
-    // Initialize notification tray icon with embedded application icon
     ZeroMemory(&g_nid, sizeof(NOTIFYICONDATAW));
     g_nid.cbSize = sizeof(NOTIFYICONDATAW);
     g_nid.hWnd = hMainWnd;
@@ -214,7 +203,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     Hooks::Uninstall();
     Shell_NotifyIconW(NIM_DELETE, &g_nid);
-    if (hMutex) CloseHandle(hMutex);
+    IconCache::Clear();
+
+    if (hMutex) {
+        CloseHandle(hMutex);
+    }
+
     Gdiplus::GdiplusShutdown(gdiplusToken);
     CoUninitialize();
 

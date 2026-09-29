@@ -46,8 +46,6 @@ struct TabDefinition {
     bool hovered = false;
 };
 
-// Immutable search index published by the background indexer thread.
-// Readers grab the shared_ptr under g_indexMutex, then iterate lock-free.
 struct IndexSnapshot {
     std::vector<AppItem> installedApps;
     std::vector<AppItem> frequentFolders;
@@ -61,12 +59,9 @@ public:
     static inline std::shared_ptr<const IndexSnapshot> g_indexSnapshot;
     static inline std::vector<TabDefinition> g_tabs;
     static inline int g_activeTabIndex = 0;
-    // Guards g_indexSnapshot publication AND every mutation of g_tabs / tab.items,
-    // so search workers can snapshot them safely while the UI thread keeps editing
     static inline std::mutex g_indexMutex;
     static inline bool g_isIndexingComplete = false;
     static inline AppLanguage g_configuredLanguage = AppLanguage::Auto;
-
     static inline bool g_cachedDarkMode = true;
 
     static void UpdateThemeCache() {
@@ -162,15 +157,13 @@ public:
     static bool DoesFolderExist(const std::wstring& path) {
         if (path.empty()) return false;
         DWORD attr = GetFileAttributesW(path.c_str());
-        if (attr == INVALID_FILE_ATTRIBUTES) return false;
-        return (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        return (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) != 0);
     }
 
     static bool DoesFileExist(const std::wstring& path) {
         if (path.empty()) return false;
         DWORD attr = GetFileAttributesW(path.c_str());
-        if (attr == INVALID_FILE_ATTRIBUTES) return false;
-        return (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
+        return (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0);
     }
 
     static std::wstring ToLower(std::wstring str) {
@@ -187,7 +180,6 @@ public:
     }
 
     static std::wstring GetConfigPath() {
-        // Resolved once per process: avoids repeated write-permission probes on every access
         static std::wstring cachedPath;
         if (!cachedPath.empty()) return cachedPath;
 
@@ -232,13 +224,6 @@ public:
         return false;
     }
 
-    static bool IsFolderPinned(const std::wstring& name, const std::vector<AppItem>& folderList) {
-        for (const auto& item : folderList) {
-            if (_wcsicmp(item.name.c_str(), name.c_str()) == 0) return true;
-        }
-        return false;
-    }
-
     static void SaveApp(const std::wstring& name, const std::wstring& path) {
         EnsureConfigUnicode();
         std::wstring iniPath = GetConfigPath();
@@ -266,7 +251,6 @@ public:
         WritePrivateProfileStringW(L"Folders", name.c_str(), nullptr, iniPath.c_str());
     }
 
-    // Completely cleans obsolete broken keys and registers verified valid shell verbs
     static void RegisterShellContextMenu() {
         std::wstring exePath = GetExecutablePath();
         if (exePath.empty() || !DoesFileExist(exePath)) return;
@@ -279,7 +263,6 @@ public:
             L"Software\\Classes\\Folder\\shell"
         };
 
-        // Aggressively scan and wipe any legacy or mispointed keys
         for (const wchar_t* parent : parentKeys) {
             HKEY hParent = nullptr;
             if (RegOpenKeyExW(HKEY_CURRENT_USER, parent, 0, KEY_READ | KEY_WRITE, &hParent) == ERROR_SUCCESS) {
@@ -290,8 +273,6 @@ public:
 
                 while (RegEnumKeyExW(hParent, index++, subKeyName, &nameLen, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS) {
                     std::wstring lower = ToLower(subKeyName);
-                    // Only remove our own verbs (current "Perdanga11.Pin" and legacy
-                    // "PinToPerdanga11"); never touch keys belonging to other software
                     if (lower.rfind(L"perdanga11", 0) == 0 || lower == L"pintoperdanga11") {
                         toDelete.push_back(subKeyName);
                     }
@@ -343,7 +324,6 @@ public:
             }
         }
 
-        // Register in SendTo folder for native bypass of execution warnings
         PWSTR pSendTo = nullptr;
         if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_SendTo, 0, nullptr, &pSendTo)) && pSendTo) {
             std::wstring sendToLnk = std::wstring(pSendTo) + L"\\" + (IsRussian() ? L"\x0417\x0430\x043A\x0440\x0435\x043F\x0438\x0442\x044C \x0432 Perdanga11.lnk" : L"Pin to Perdanga11.lnk");
@@ -366,7 +346,7 @@ public:
 
     static std::wstring GetStartupShortcutPath() {
         PWSTR pStartup = nullptr;
-        std::wstring path = L"";
+        std::wstring path;
         if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Startup, 0, nullptr, &pStartup)) && pStartup) {
             path = std::wstring(pStartup) + L"\\Perdanga11.lnk";
             CoTaskMemFree(pStartup);
@@ -490,8 +470,6 @@ public:
         }
     }
 
-    // NOTE: LoadTabs mutates g_tabs without locking; callers must either hold
-    // g_indexMutex already or run before worker threads exist (WM_CREATE)
     static void LoadTabs() {
         EnsureConfigUnicode();
         UpdateThemeCache();
@@ -508,7 +486,7 @@ public:
 
         g_tabs.clear();
 
-        if (wcslen(tabsList) == 0) {
+        if (tabsList[0] == L'\0') {
             TabDefinition tPinned;
             tPinned.id = L"pinned";
             tPinned.name = L"Pinned";
@@ -586,7 +564,7 @@ public:
     static void SaveTabs() {
         EnsureConfigUnicode();
         std::wstring iniPath = GetConfigPath();
-        std::wstring tabIdList = L"";
+        std::wstring tabIdList;
 
         for (size_t i = 0; i < g_tabs.size(); ++i) {
             if (i > 0) tabIdList += L",";

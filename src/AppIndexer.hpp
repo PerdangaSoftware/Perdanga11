@@ -6,6 +6,7 @@
 #include <shlobj.h>
 #include <cwctype>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <algorithm>
 #include <unordered_set>
@@ -24,6 +25,30 @@ private:
     static inline HICON s_defaultFileIcon = nullptr;
 
 public:
+    static void Clear() {
+        std::lock_guard<std::mutex> lock(s_cacheMutex);
+        for (auto& pair : s_fileIconCache) {
+            if (pair.second) DestroyIcon(pair.second);
+        }
+        s_fileIconCache.clear();
+
+        for (auto& pair : s_shortcutIconCache) {
+            if (pair.second) DestroyIcon(pair.second);
+        }
+        s_shortcutIconCache.clear();
+
+        for (auto& pair : s_extCache) {
+            if (pair.second) DestroyIcon(pair.second);
+        }
+        s_extCache.clear();
+
+        if (s_defaultFolderIcon) {
+            DestroyIcon(s_defaultFolderIcon);
+            s_defaultFolderIcon = nullptr;
+        }
+        s_defaultFileIcon = nullptr;
+    }
+
     static HICON GetDefaultFolderIcon() {
         std::lock_guard<std::mutex> lock(s_cacheMutex);
         if (!s_defaultFolderIcon) {
@@ -84,8 +109,6 @@ public:
         return GetExtensionIcon(ext);
     }
 
-    // Icons referenced by .lnk shortcuts must be cached: ExtractIconExW creates a new
-    // HICON on every call and pinned items are reloaded on each menu open (leak source)
     static HICON GetShortcutIcon(const std::wstring& iconPath, int iconIndex) {
         std::wstring key = Config::ToLower(iconPath) + L"|" + std::to_wstring(iconIndex);
         {
@@ -114,7 +137,7 @@ public:
     static std::wstring ResolveLnkTarget(const std::wstring& lnkPath, std::wstring& outIconPath, int& outIconIndex) {
         IShellLinkW* psl = nullptr;
         std::wstring targetPath = lnkPath;
-        outIconPath = L"";
+        outIconPath.clear();
         outIconIndex = 0;
 
         if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, (void**)&psl))) {
@@ -124,13 +147,13 @@ public:
                     wchar_t szTarget[MAX_PATH] = { 0 };
                     WIN32_FIND_DATAW wfd;
                     if (SUCCEEDED(psl->GetPath(szTarget, MAX_PATH, &wfd, SLGP_UNCPRIORITY))) {
-                        if (wcslen(szTarget) > 0) targetPath = szTarget;
+                        if (szTarget[0] != L'\0') targetPath = szTarget;
                     }
 
                     wchar_t szIcon[MAX_PATH] = { 0 };
                     int nIcon = 0;
                     if (SUCCEEDED(psl->GetIconLocation(szIcon, MAX_PATH, &nIcon))) {
-                        if (wcslen(szIcon) > 0) {
+                        if (szIcon[0] != L'\0') {
                             outIconPath = szIcon;
                             outIconIndex = nIcon;
                         }
@@ -155,7 +178,7 @@ public:
         }
 
         std::wstring targetPath = path;
-        std::wstring iconPath = L"";
+        std::wstring iconPath;
         int iconIndex = 0;
 
         wchar_t expandedInput[MAX_PATH];
@@ -376,7 +399,7 @@ public:
                 if (type == DRIVE_FIXED || type == DRIVE_REMOVABLE) {
                     wchar_t volName[MAX_PATH] = { 0 };
                     std::wstring driveName;
-                    if (GetVolumeInformationW(driveLetter, volName, MAX_PATH, nullptr, nullptr, nullptr, nullptr, 0) && wcslen(volName) > 0) {
+                    if (GetVolumeInformationW(driveLetter, volName, MAX_PATH, nullptr, nullptr, nullptr, nullptr, 0) && volName[0] != L'\0') {
                         driveName = std::wstring(volName) + L" (" + std::wstring(driveLetter, 2) + L")";
                     } else {
                         driveName = std::wstring(L"Disk (") + std::wstring(driveLetter, 2) + L")";
@@ -578,8 +601,6 @@ public:
             snapshot->userFiles = std::move(userItems);
 
             {
-                // Publish the immutable snapshot under a short lock; search workers
-                // hold their own shared_ptr copy and iterate it without locking
                 std::lock_guard<std::mutex> lock(Config::g_indexMutex);
                 Config::g_indexSnapshot = std::move(snapshot);
                 Config::g_isIndexingComplete = true;
@@ -614,8 +635,7 @@ public:
         return result;
     }
 
-    // Levenshtein using fixed stack buffer to avoid heap vector allocations during search
-    static int LevenshteinDistance(const std::wstring& s1, const std::wstring& s2) {
+    static int LevenshteinDistance(std::wstring_view s1, std::wstring_view s2) {
         const size_t len1 = s1.size(), len2 = s2.size();
         if (len1 == 0) return (int)len2;
         if (len2 == 0) return (int)len1;
@@ -637,7 +657,6 @@ public:
         return col[len2];
     }
 
-    // High-speed matching that relies on query variants precomputed once per search
     static int CalculateItemScoreFast(const AppItem& item,
                                       const std::wstring& lowerQuery,
                                       const std::wstring& convertedQuery,
@@ -645,23 +664,14 @@ public:
                                       const std::vector<std::wstring>& convertedTokens) {
         if (lowerQuery.empty()) return 100;
 
-        // 1. Exact match on item name
-        if (item.lowerName == lowerQuery) {
-            return 100;
-        }
+        if (item.lowerName == lowerQuery) return 100;
+        if (item.lowerName.rfind(lowerQuery, 0) == 0) return 96;
 
-        // 2. Direct prefix match on item name
-        if (item.lowerName.rfind(lowerQuery, 0) == 0) {
-            return 96;
-        }
-
-        // 3. Substring match on item name
         size_t namePos = item.lowerName.find(lowerQuery);
         if (namePos != std::wstring::npos) {
             return 92 - (int)(std::min)((size_t)15, namePos);
         }
 
-        // 4. Converted keyboard layout match on item name
         if (convertedQuery != lowerQuery) {
             if (item.lowerName == convertedQuery) return 98;
             if (item.lowerName.rfind(convertedQuery, 0) == 0) return 94;
@@ -669,7 +679,6 @@ public:
             if (cpos != std::wstring::npos) return 88 - (int)(std::min)((size_t)15, cpos);
         }
 
-        // 5. Multi-token match without per-item string conversions
         if (tokens.size() > 1) {
             bool allInName = true;
             for (size_t t = 0; t < tokens.size(); ++t) {
@@ -680,9 +689,7 @@ public:
                     }
                 }
             }
-            if (allInName) {
-                return 95;
-            }
+            if (allInName) return 95;
 
             bool allFound = true;
             for (size_t t = 0; t < tokens.size(); ++t) {
@@ -699,26 +706,23 @@ public:
                     break;
                 }
             }
-            if (allFound) {
-                return 72;
-            }
+            if (allFound) return 72;
         }
 
-        // 6. Direct extension filter
         if (!item.lowerExt.empty()) {
-            if (lowerQuery == item.lowerExt || (lowerQuery.length() + 1 == item.lowerExt.length() && item.lowerExt.compare(1, lowerQuery.length(), lowerQuery) == 0)) {
+            if (lowerQuery == item.lowerExt || 
+               (lowerQuery.length() + 1 == item.lowerExt.length() && item.lowerExt.compare(1, lowerQuery.length(), lowerQuery) == 0)) {
                 return 80;
             }
         }
 
-        // 7. Substring match on file path
         if (!item.lowerTarget.empty() && item.lowerTarget.find(lowerQuery) != std::wstring::npos) {
             return 68;
         }
 
-        // 8. Fuzzy match for longer queries
         if (lowerQuery.length() >= 4 && item.lowerName.length() >= 3 && item.lowerName.length() <= 32) {
-            int dist = LevenshteinDistance(item.lowerName.substr(0, (std::min)(item.lowerName.length(), lowerQuery.length())), lowerQuery);
+            std::wstring_view prefix(item.lowerName.c_str(), (std::min)(item.lowerName.length(), lowerQuery.length()));
+            int dist = LevenshteinDistance(prefix, lowerQuery);
             if (dist <= 2) return 55 - (dist * 10);
         }
 
