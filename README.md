@@ -18,22 +18,22 @@
 
 ## Highlights & Features
 
-- **Fast Start:** Written entirely in pure native Win32/C++17 with zero third-party dependencies. Idles at **< 20 MB RAM** with instant display response.
-- **Deep Multi Search:** Background multi-threaded scans applications, Desktop items, user libraries, and all connected drives ($A:\dots Z:$) with specific support for documents and media (`.txt`, `.png`, `.jpg`, `.pdf`, `.docx`, etc.).
+- **Fast Start:** Written entirely in pure native C++ with zero third-party dependencies.
+- **Deep Multi Search:** Background multi-threaded scans applications, desktop items, user libraries, and all connected drives with specific support for documents and media.
 - **Custom Categorized Tabs:** Organize your workspace with customizable tabs (Pinned, Folders, Tools, Games, etc.). Drag-and-drop tiles to rearrange, rename tabs, or create new categories with a simple right-click.
 - **Consecutive Multi-Launch:** Launch multiple programs in succession without the menu auto-closing simply by holding `Shift` while clicking (or via middle mouse click). Standard single-click launches and dismisses immediately.
-- **Intelligent Path:** Hovering any tile displays a clean, floating info card showing the program's actual installation directory (automatically resolving `.lnk` shortcuts to the real `.exe` destination) and its full, un-truncated title.
+- **Intelligent Path:** Hovering any tile displays a clean, floating info card showing the program's actual installation directory.
 - **Native Explorer Pinning & SendTo:** Pin files, folders, and executables directly from Windows Explorer or the Desktop.
-- **Smooth Fluent Design:** Hardware-accelerated GDI+ and DWM backdrop rendering featuring Windows 11 dark/light mode detection.
+- **Theme Support:** Automatically adapts to Windows 11 dark and light modes.
 
 ---
 
 ## Technology Stack
 
-- **Core Architecture:** C++17 (MSVC), Windows API (Win32, OLE2, Shell APIs, DWM).
-- **Graphics & Rendering:** GDI+, DirectComposition, Fluent 2 optical typography hierarchy (`Display`, `Text`, `Small`).
-- **System Hooks & Interception:** Low-Level Windows Hooks (`WH_KEYBOARD_LL`, `WH_MOUSE_LL`), UI Automation Core for Taskbar detection, full-screen foreground monitoring, and UIPI message filtering (`ChangeWindowMessageFilter`).
-- **Persistence & Config:** Dual-mode storage architecture supporting both portable configuration and user-level `%APPDATA%\Perdanga11\config.ini` persistence (preserving UTF-16 LE BOM Cyrillic and international character encoding).
+- **Core:** C++17 (MSVC), Win32 API, Shell APIs, DWM.
+- **Graphics & Rendering:** GDI+, DirectComposition, and Fluent 2 typography (`Display`, `Text`).
+- **System Hooks & Interception:** Low-level Windows hooks (`WH_KEYBOARD_LL`, `WH_MOUSE_LL`), UI Automation, and UIPI filtering.
+- **Configuration:** Supports both portable mode and user-level storage in `%APPDATA%\Perdanga11\config.ini`.
 - **Packaging:** Inno Setup 6.
 
 ---
