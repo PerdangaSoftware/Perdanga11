@@ -5,7 +5,7 @@
 <h1 align="center">Perdanga11</h1>
 
 <p align="center">
-  <b>Replacement for the Windows 11 Start.</b>
+  <b>Replacement for the Windows 11 Start Menu.</b>
 </p>
 
 <br/>
