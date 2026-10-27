@@ -10,7 +10,7 @@
 
 <br/>
 
-<img src="https://gitlab.com/perdanga/perdanga11/-/raw/main/screenshots/Perdanga11menu.png?ref_type=heads" width="520" alt="Perdanga11 Interface Preview"/>
+<img src="https://github.com/PerdangaSoftware/Perdanga11/blob/main/assets/Perdanga11menu.png?raw=true" width="520" alt="Perdanga11 Interface Preview"/>
 
 </div>
 
