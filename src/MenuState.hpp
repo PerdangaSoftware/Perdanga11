@@ -30,6 +30,7 @@
 #define TIMER_RESET_DEACTIVATE  5007
 #define TIMER_RECT_DEBOUNCE     5008
 #define TIMER_BLOCK_START       5009
+#define TIMER_INIT_TASKBAR_POLL 5010
 
 enum MenuViewMode {
     MODE_TABS = 0,
@@ -202,11 +203,12 @@ public:
                 bool keepOpen = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
 
                 if (targetIdx >= 0) {
+                    g_justLaunchedTime = GetTickCount();
+                    g_justLaunchedIndex = targetIdx;
+                    Hooks::DismissNativeShellOverlays();
                     MenuInteraction::ExecuteApp(g_displayItems[targetIdx], false);
                     if (keepOpen) {
                         g_suppressCloseOnDeactivate = true;
-                        g_justLaunchedIndex = targetIdx;
-                        g_justLaunchedTime = GetTickCount();
                         SetTimer(g_hWnd, TIMER_LAUNCH_FLASH, 500, nullptr);
                         SetTimer(g_hWnd, TIMER_RESET_DEACTIVATE, 600, nullptr);
                         SetWindowPos(g_hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -234,7 +236,7 @@ public:
     }
 
     static void InvalidateGridArea() {
-        RECT gridArea = { 0, GRID_START_Y - 40, MENU_WIDTH, MENU_HEIGHT - 52 };
+        RECT gridArea = { 0, 56, MENU_WIDTH, MENU_HEIGHT - 52 };
         InvalidateRect(g_hWnd, &gridArea, FALSE);
     }
 
@@ -324,7 +326,16 @@ public:
                     std::lock_guard<std::mutex> lock(Config::g_indexMutex);
                     snap = Config::g_indexSnapshot;
                 }
-                g_displayItems = snap ? snap->installedApps : std::vector<AppItem>();
+                g_displayItems.clear();
+                if (snap) {
+                    for (const auto& item : snap->installedApps) {
+                        if (AppIndexer::IsSystem32Path(item.target) ||
+                            AppIndexer::IsSystem32Path(item.lowerTarget)) {
+                            continue;
+                        }
+                        g_displayItems.push_back(item);
+                    }
+                }
             } else {
                 const auto& activeTab = Config::GetActiveTab();
                 g_displayItems = activeTab.items;
@@ -435,7 +446,9 @@ public:
     static void Toggle(bool show) {
         if (show) {
             Hooks::DismissNativeShellOverlays();
-            Hooks::UpdateStartButtonRect();
+            if ((Hooks::g_startButtonRect.right - Hooks::g_startButtonRect.left) <= 0) {
+                Hooks::UpdateStartButtonRect(true);
+            }
 
             MenuInteraction::g_isPowerMenuOpen = false;
             g_currentMode = MODE_TABS;

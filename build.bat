@@ -1,9 +1,41 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
+
 echo =======================================================
 echo                 Building Perdanga11
 echo =======================================================
 
+where cl.exe >nul 2>&1
+if %ERRORLEVEL% equ 0 goto :compiler_found
+
+echo [INFO] cl.exe not in PATH. Searching for MSVC environment...
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if not exist "%VSWHERE%" set "VSWHERE=%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe"
+
+if not exist "%VSWHERE%" goto :compiler_missing
+
+for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
+    set "VS_DIR=%%i"
+)
+
+if not defined VS_DIR goto :compiler_missing
+if not exist "%VS_DIR%\VC\Auxiliary\Build\vcvars64.bat" goto :compiler_missing
+
+echo [INFO] Initializing x64 Build Tools from: %VS_DIR%
+call "%VS_DIR%\VC\Auxiliary\Build\vcvars64.bat" >nul
+
+:compiler_found
+where cl.exe >nul 2>&1
+if %ERRORLEVEL% neq 0 goto :compiler_missing
+goto :compile_start
+
+:compiler_missing
+echo [ERROR] MSVC C++ compiler (cl.exe) not found.
+echo         Please run "install_build_tools.bat" to install the build environment,
+echo         or open "x64 Native Tools Command Prompt for VS" and run build.bat again.
+exit /b 1
+
+:compile_start
 taskkill /f /im Perdanga11.exe 2>nul
 taskkill /f /im Perdanga11_Setup.exe 2>nul
 
@@ -48,14 +80,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "}"
 
 echo [4/4] Compiling Inno Setup Installer...
-set "ISCC_PATH=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
+set "ISCC_PATH=%LocalAppData%\Programs\Inno Setup 6\ISCC.exe"
+if not exist "%ISCC_PATH%" set "ISCC_PATH=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
 if not exist "%ISCC_PATH%" set "ISCC_PATH=%ProgramFiles%\Inno Setup 6\ISCC.exe"
+if not exist "%ISCC_PATH%" (
+    where ISCC.exe >nul 2>&1
+    if !ERRORLEVEL! equ 0 (
+        for /f "tokens=*" %%a in ('where ISCC.exe') do set "ISCC_PATH=%%a"
+    )
+)
 
 if exist "%ISCC_PATH%" (
+    echo [INFO] Using Inno Setup compiler: "%ISCC_PATH%"
     "%ISCC_PATH%" "installer\setup.iss"
-    echo [OK] Installer built successfully in dist\Perdanga11_Setup.exe
+    if !ERRORLEVEL! equ 0 (
+        echo [OK] Installer built successfully in dist\Perdanga11_Setup.exe
+    ) else (
+        echo [ERROR] Inno Setup compilation failed.
+    )
 ) else (
-    echo [INFO] Inno Setup compiler not found in standard path.
+    echo [INFO] Inno Setup compiler not found in standard paths.
     echo        Compile installer\setup.iss manually via Inno Setup GUI.
 )
 

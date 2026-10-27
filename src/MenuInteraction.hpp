@@ -11,6 +11,7 @@
 #include <string>
 #include "Config.hpp"
 #include "AppIndexer.hpp"
+#include "Hooks.hpp"
 
 #define ID_MENU_PIN_ACTION 3000
 #define ID_MENU_RUN_ADMIN 3001
@@ -101,6 +102,7 @@ public:
                 return;
             }
         }
+        Hooks::DismissNativeShellOverlays();
         ShellExecuteW(nullptr, asAdmin ? L"runas" : L"open", item.target.c_str(), item.arguments.c_str(), nullptr, SW_SHOWNORMAL);
     }
 

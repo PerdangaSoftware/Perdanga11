@@ -18,6 +18,9 @@ public:
     static inline HWINEVENTHOOK g_hWinEventHook = nullptr;
     static inline HWND g_hTargetWnd = nullptr;
     static inline RECT g_startButtonRect = { 0, 0, 0, 0 };
+    static inline RECT g_searchButtonRect = { 0, 0, 0, 0 };
+    static inline RECT g_lastTaskbarRect = { 0, 0, 0, 0 };
+    static inline DWORD g_lastUpdateTick = 0;
     static inline UINT g_taskbarEdge = ABE_BOTTOM;
     static inline DWORD g_taskbarAlignment = 1;
     static inline bool g_winKeyDown = false;
@@ -111,41 +114,63 @@ public:
     static BOOL CALLBACK HideShellOverlayEnumProc(HWND hwnd, LPARAM) {
         if (!IsWindowVisible(hwnd)) return TRUE;
 
-        if (IsNativeStartWindow(hwnd) || IsNativeSearchWindow(hwnd)) {
+        // ONLY target native Start menu (StartMenuExperienceHost.exe).
+        // NEVER hide or relocate SearchHost.exe! Doing so destroys the Windows 11 taskbar search UI island.
+        if (IsNativeStartWindow(hwnd)) {
             ShowWindow(hwnd, SW_HIDE);
+            SetWindowPos(hwnd, nullptr, -32000, -32000, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER);
         }
         return TRUE;
     }
 
     static void DismissNativeShellOverlays() {
         HWND hFore = GetForegroundWindow();
-        if (hFore && (IsNativeStartWindow(hFore) || IsNativeSearchWindow(hFore))) {
-            keybd_event(VK_ESCAPE, 0, 0, 0);
-            keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0);
+        if (hFore) {
+            if (IsNativeStartWindow(hFore)) {
+                ShowWindow(hFore, SW_HIDE);
+                SetWindowPos(hFore, nullptr, -32000, -32000, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER);
+                keybd_event(VK_ESCAPE, 0, 0, 0);
+                keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0);
+            } else if (IsNativeSearchWindow(hFore)) {
+                // For native Windows Search flyout, only dismiss via Escape.
+                // Never hide or move its window offscreen.
+                keybd_event(VK_ESCAPE, 0, 0, 0);
+                keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0);
+            }
         }
 
         EnumWindows(HideShellOverlayEnumProc, 0);
     }
 
-    static void UpdateStartButtonRect() {
+    static void UpdateStartButtonRect(bool force = false) {
         HWND hTaskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
         if (!hTaskbar) return;
+
+        DWORD now = GetTickCount();
+        RECT rcCurrentTaskbar = { 0 };
+        GetWindowRect(hTaskbar, &rcCurrentTaskbar);
+
+        if (!force && (now - g_lastUpdateTick < 1000) &&
+            EqualRect(&rcCurrentTaskbar, &g_lastTaskbarRect) &&
+            (g_startButtonRect.right - g_startButtonRect.left) > 0) {
+            return;
+        }
+
+        g_lastTaskbarRect = rcCurrentTaskbar;
+        g_lastUpdateTick = now;
 
         APPBARDATA abd = { sizeof(APPBARDATA) };
         abd.hWnd = hTaskbar;
         if (SHAppBarMessage(ABM_GETTASKBARPOS, &abd)) {
             g_taskbarEdge = abd.uEdge;
         } else {
-            RECT rcT = { 0 };
-            if (GetWindowRect(hTaskbar, &rcT)) {
-                HMONITOR hMon = MonitorFromWindow(hTaskbar, MONITOR_DEFAULTTONEAREST);
-                MONITORINFO mi = { sizeof(MONITORINFO) };
-                if (GetMonitorInfoW(hMon, &mi)) {
-                    if (rcT.left <= mi.rcMonitor.left && rcT.right >= mi.rcMonitor.right) {
-                        g_taskbarEdge = (rcT.top <= mi.rcMonitor.top) ? ABE_TOP : ABE_BOTTOM;
-                    } else {
-                        g_taskbarEdge = (rcT.left <= mi.rcMonitor.left) ? ABE_LEFT : ABE_RIGHT;
-                    }
+            HMONITOR hMon = MonitorFromWindow(hTaskbar, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO mi = { sizeof(MONITORINFO) };
+            if (GetMonitorInfoW(hMon, &mi)) {
+                if (rcCurrentTaskbar.left <= mi.rcMonitor.left && rcCurrentTaskbar.right >= mi.rcMonitor.right) {
+                    g_taskbarEdge = (rcCurrentTaskbar.top <= mi.rcMonitor.top) ? ABE_TOP : ABE_BOTTOM;
+                } else {
+                    g_taskbarEdge = (rcCurrentTaskbar.left <= mi.rcMonitor.left) ? ABE_LEFT : ABE_RIGHT;
                 }
             }
         }
@@ -179,6 +204,12 @@ public:
             }
         }
 
+        bool needCoUninit = false;
+        HRESULT hrCom = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        if (hrCom == S_OK || hrCom == S_FALSE) {
+            needCoUninit = true;
+        }
+
         bool startButtonResolved = false;
         IUIAutomation* pAutomation = nullptr;
         HRESULT hr = CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_IUIAutomation, (void**)&pAutomation);
@@ -199,29 +230,26 @@ public:
                         tagRECT rect;
                         if (SUCCEEDED(pStartBtn->get_CurrentBoundingRectangle(&rect))) {
                             if ((rect.right - rect.left) > 0 && (rect.bottom - rect.top) > 0) {
-                                RECT rcTaskbar;
-                                if (GetWindowRect(hTaskbar, &rcTaskbar)) {
-                                    bool isUiaStale = false;
-                                    int btnWidth = rect.right - rect.left;
-                                    int barWidth = rcTaskbar.right - rcTaskbar.left;
-                                    int distFromLeft = rect.left - rcTaskbar.left;
+                                bool isUiaStale = false;
+                                int btnWidth = rect.right - rect.left;
+                                int barWidth = rcCurrentTaskbar.right - rcCurrentTaskbar.left;
+                                int distFromLeft = rect.left - rcCurrentTaskbar.left;
 
-                                    if (g_taskbarEdge == ABE_BOTTOM || g_taskbarEdge == ABE_TOP) {
-                                        if (g_taskbarAlignment == 0) {
-                                            if (distFromLeft > btnWidth * 3) {
-                                                isUiaStale = true;
-                                            }
-                                        } else if (g_taskbarAlignment == 1) {
-                                            if (distFromLeft < btnWidth * 2 && barWidth > btnWidth * 5) {
-                                                isUiaStale = true;
-                                            }
+                                if (g_taskbarEdge == ABE_BOTTOM || g_taskbarEdge == ABE_TOP) {
+                                    if (g_taskbarAlignment == 0) {
+                                        if (distFromLeft > btnWidth * 3) {
+                                            isUiaStale = true;
+                                        }
+                                    } else if (g_taskbarAlignment == 1) {
+                                        if (distFromLeft < btnWidth * 2 && barWidth > btnWidth * 5) {
+                                            isUiaStale = true;
                                         }
                                     }
+                                }
 
-                                    if (!isUiaStale) {
-                                        g_startButtonRect = rect;
-                                        startButtonResolved = true;
-                                    }
+                                if (!isUiaStale) {
+                                    g_startButtonRect = rect;
+                                    startButtonResolved = true;
                                 }
                             }
                         }
@@ -229,34 +257,83 @@ public:
                     }
                     pCond->Release();
                 }
+
+                // Resolve SearchButton / SearchTextBox
+                VARIANT vSearchBtn, vSearchBox;
+                vSearchBtn.vt = VT_BSTR;
+                vSearchBtn.bstrVal = SysAllocString(L"SearchButton");
+                vSearchBox.vt = VT_BSTR;
+                vSearchBox.bstrVal = SysAllocString(L"SearchTextBox");
+
+                IUIAutomationCondition* pCond1 = nullptr;
+                IUIAutomationCondition* pCond2 = nullptr;
+                IUIAutomationCondition* pSearchCond = nullptr;
+
+                pAutomation->CreatePropertyCondition(UIA_AutomationIdPropertyId, vSearchBtn, &pCond1);
+                pAutomation->CreatePropertyCondition(UIA_AutomationIdPropertyId, vSearchBox, &pCond2);
+                SysFreeString(vSearchBtn.bstrVal);
+                SysFreeString(vSearchBox.bstrVal);
+
+                if (pCond1 && pCond2) {
+                    pAutomation->CreateOrCondition(pCond1, pCond2, &pSearchCond);
+                } else if (pCond1) {
+                    pSearchCond = pCond1;
+                    pCond1 = nullptr;
+                } else if (pCond2) {
+                    pSearchCond = pCond2;
+                    pCond2 = nullptr;
+                }
+
+                if (pCond1) pCond1->Release();
+                if (pCond2) pCond2->Release();
+
+                if (pSearchCond) {
+                    IUIAutomationElement* pSearchElem = nullptr;
+                    if (SUCCEEDED(pTaskbarElem->FindFirst(TreeScope_Descendants, pSearchCond, &pSearchElem)) && pSearchElem) {
+                        tagRECT rcSearch;
+                        if (SUCCEEDED(pSearchElem->get_CurrentBoundingRectangle(&rcSearch))) {
+                            if ((rcSearch.right - rcSearch.left) > 0 && (rcSearch.bottom - rcSearch.top) > 0) {
+                                g_searchButtonRect = rcSearch;
+                            }
+                        }
+                        pSearchElem->Release();
+                    }
+                    pSearchCond->Release();
+                }
+
                 pTaskbarElem->Release();
             }
             pAutomation->Release();
         }
 
+        if (needCoUninit) {
+            CoUninitialize();
+        }
+
         if (!startButtonResolved) {
-            RECT rcTaskbar;
-            if (GetWindowRect(hTaskbar, &rcTaskbar)) {
-                if (g_taskbarEdge == ABE_BOTTOM || g_taskbarEdge == ABE_TOP) {
-                    int btnSize = rcTaskbar.bottom - rcTaskbar.top;
-                    if (btnSize <= 0) btnSize = 48;
+            if (g_taskbarEdge == ABE_BOTTOM || g_taskbarEdge == ABE_TOP) {
+                int btnSize = rcCurrentTaskbar.bottom - rcCurrentTaskbar.top;
+                if (btnSize <= 0) btnSize = 48;
 
-                    if (g_taskbarAlignment == 1) {
-                        int centerX = (rcTaskbar.left + rcTaskbar.right) / 2;
-                        g_startButtonRect = { centerX - btnSize / 2, rcTaskbar.top, centerX + btnSize / 2, rcTaskbar.bottom };
-                    } else {
-                        g_startButtonRect = { rcTaskbar.left, rcTaskbar.top, rcTaskbar.left + btnSize, rcTaskbar.bottom };
-                    }
+                if (g_taskbarAlignment == 1) {
+                    int centerX = (rcCurrentTaskbar.left + rcCurrentTaskbar.right) / 2;
+                    int startLeft = centerX - (btnSize * 4);
+                    if (startLeft < rcCurrentTaskbar.left + btnSize) startLeft = rcCurrentTaskbar.left + btnSize;
+                    g_startButtonRect = { startLeft, rcCurrentTaskbar.top, startLeft + btnSize, rcCurrentTaskbar.bottom };
                 } else {
-                    int btnSize = rcTaskbar.right - rcTaskbar.left;
-                    if (btnSize <= 0) btnSize = 48;
+                    g_startButtonRect = { rcCurrentTaskbar.left, rcCurrentTaskbar.top, rcCurrentTaskbar.left + btnSize, rcCurrentTaskbar.bottom };
+                }
+            } else {
+                int btnSize = rcCurrentTaskbar.right - rcCurrentTaskbar.left;
+                if (btnSize <= 0) btnSize = 48;
 
-                    if (g_taskbarAlignment == 1) {
-                        int centerY = (rcTaskbar.top + rcTaskbar.bottom) / 2;
-                        g_startButtonRect = { rcTaskbar.left, centerY - btnSize / 2, rcTaskbar.right, centerY + btnSize / 2 };
-                    } else {
-                        g_startButtonRect = { rcTaskbar.left, rcTaskbar.top, rcTaskbar.right, rcTaskbar.top + btnSize };
-                    }
+                if (g_taskbarAlignment == 1) {
+                    int centerY = (rcCurrentTaskbar.top + rcCurrentTaskbar.bottom) / 2;
+                    int startTop = centerY - (btnSize * 4);
+                    if (startTop < rcCurrentTaskbar.top + btnSize) startTop = rcCurrentTaskbar.top + btnSize;
+                    g_startButtonRect = { rcCurrentTaskbar.left, startTop, rcCurrentTaskbar.right, startTop + btnSize };
+                } else {
+                    g_startButtonRect = { rcCurrentTaskbar.left, rcCurrentTaskbar.top, rcCurrentTaskbar.right, rcCurrentTaskbar.top + btnSize };
                 }
             }
         }
@@ -284,8 +361,9 @@ public:
                     return 1;
                 } else if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
                     if (g_winKeyDown && !g_winCombinationPressed) {
-                        PostMessageW(g_hTargetWnd, WM_APP_TOGGLE_MENU, 0, 0);
+                        keybd_event(0xE8, 0, 0, 0);
                         keybd_event(0xE8, 0, KEYEVENTF_KEYUP, 0);
+                        PostMessageW(g_hTargetWnd, WM_APP_TOGGLE_MENU, 0, 0);
                     } else if (g_winCombinationPressed) {
                         keybd_event((BYTE)pKey->vkCode, 0, KEYEVENTF_KEYUP, 0);
                     }
@@ -310,6 +388,8 @@ public:
     static BOOL CALLBACK NativeStartWatchdogEnumProc(HWND hwnd, LPARAM lParam);
 
     static DWORD WINAPI HookThreadProc(LPVOID) {
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
         g_hKeyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, g_hInst, 0);
         g_hMouseHook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, g_hInst, 0);
 
@@ -321,7 +401,7 @@ public:
             DWORD dwWait = MsgWaitForMultipleObjectsEx(dwCount, hWaitEvents, INFINITE, QS_ALLINPUT, MWMO_ALERTABLE);
 
             if (dwWait == WAIT_OBJECT_0) {
-                UpdateStartButtonRect();
+                UpdateStartButtonRect(true);
                 if (g_hKeyAdvanced && g_hRegChangeEvent) {
                     RegNotifyChangeKeyValue(g_hKeyAdvanced, FALSE, REG_NOTIFY_CHANGE_LAST_SET, g_hRegChangeEvent, TRUE);
                 }
@@ -340,6 +420,8 @@ public:
 
         if (g_hKeyboardHook) { UnhookWindowsHookEx(g_hKeyboardHook); g_hKeyboardHook = nullptr; }
         if (g_hMouseHook) { UnhookWindowsHookEx(g_hMouseHook); g_hMouseHook = nullptr; }
+
+        CoUninitialize();
         return 0;
     }
 
@@ -356,7 +438,7 @@ public:
             RegNotifyChangeKeyValue(g_hKeyAdvanced, FALSE, REG_NOTIFY_CHANGE_LAST_SET, g_hRegChangeEvent, TRUE);
         }
 
-        UpdateStartButtonRect();
+        UpdateStartButtonRect(true);
 
         g_hHookThread = CreateThread(nullptr, 0, HookThreadProc, nullptr, 0, &g_hookThreadId);
 

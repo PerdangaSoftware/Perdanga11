@@ -60,6 +60,26 @@ public:
         return s_defaultFolderIcon;
     }
 
+    static HICON GetDriveIcon(const std::wstring& path) {
+        std::wstring norm = Config::ToLower(path);
+        {
+            std::lock_guard<std::mutex> lock(s_cacheMutex);
+            auto it = s_fileIconCache.find(norm);
+            if (it != s_fileIconCache.end() && it->second) {
+                return it->second;
+            }
+        }
+
+        SHFILEINFOW sfi = { 0 };
+        if (SHGetFileInfoW(path.c_str(), 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_LARGEICON) && sfi.hIcon) {
+            std::lock_guard<std::mutex> lock(s_cacheMutex);
+            s_fileIconCache[norm] = sfi.hIcon;
+            return sfi.hIcon;
+        }
+
+        return GetDefaultFolderIcon();
+    }
+
     static HICON GetDefaultFileIcon() {
         std::lock_guard<std::mutex> lock(s_cacheMutex);
         if (!s_defaultFileIcon) {
@@ -169,10 +189,7 @@ public:
     static HICON ExtractCleanIcon(const std::wstring& path, bool isDir = false) {
         if (isDir) {
             if (path.length() <= 3 && path.find(L':') != std::wstring::npos) {
-                SHFILEINFOW sfi = { 0 };
-                if (SHGetFileInfoW(path.c_str(), 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_LARGEICON) && sfi.hIcon) {
-                    return sfi.hIcon;
-                }
+                return IconCache::GetDriveIcon(path);
             }
             return IconCache::GetDefaultFolderIcon();
         }
@@ -229,10 +246,24 @@ public:
         return s;
     }
 
+    static bool IsSystem32Path(const std::wstring& path) {
+        if (path.empty()) return false;
+        std::wstring lower = Config::ToLower(path);
+        for (auto& c : lower) {
+            if (c == L'/') c = L'\\';
+        }
+        return (lower.find(L"\\system32") != std::wstring::npos ||
+                lower.find(L"\\syswow64") != std::wstring::npos);
+    }
+
     static bool IsJunkOrSecondaryShortcut(const std::wstring& name, const std::wstring& fullShortcutPath, const std::wstring& resolvedTarget) {
         std::wstring lowerName = Config::ToLower(name);
         std::wstring lowerPath = Config::ToLower(fullShortcutPath);
         std::wstring lowerTarget = Config::ToLower(resolvedTarget);
+
+        if (IsSystem32Path(lowerTarget) || IsSystem32Path(lowerPath)) {
+            return true;
+        }
 
         if (lowerPath.find(L"\\administrative tools") != std::wstring::npos ||
             lowerPath.find(L"\\windows tools") != std::wstring::npos ||
@@ -279,8 +310,9 @@ public:
         if (lowerName == L"git cmd" || lowerName == L"git gui") return true;
         if (lowerName == L"dfrgui" || lowerName == L"services") return true;
 
+        size_t slashPos = lowerTarget.find_last_of(L"\\/");
         size_t dotPos = lowerTarget.find_last_of(L'.');
-        if (dotPos == std::wstring::npos) return true;
+        if (dotPos == std::wstring::npos || (slashPos != std::wstring::npos && dotPos < slashPos)) return true;
         std::wstring ext = lowerTarget.substr(dotPos);
         return (ext != L".exe");
     }

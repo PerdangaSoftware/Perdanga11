@@ -355,39 +355,66 @@ public:
     }
 
     static bool IsAutostartEnabled() {
+        HKEY hRunKey = nullptr;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_READ, &hRunKey) == ERROR_SUCCESS) {
+            DWORD type = 0;
+            LONG res = RegQueryValueExW(hRunKey, L"Perdanga11", nullptr, &type, nullptr, nullptr);
+            RegCloseKey(hRunKey);
+            if (res == ERROR_SUCCESS) return true;
+        }
+
         std::wstring path = GetStartupShortcutPath();
-        if (path.empty()) return false;
-        return DoesFileExist(path);
+        if (!path.empty() && DoesFileExist(path)) return true;
+
+        return false;
     }
 
     static void SetAutostart(bool enable) {
+        std::wstring exePath = GetExecutablePath();
         std::wstring shortcutPath = GetStartupShortcutPath();
-        if (shortcutPath.empty()) return;
 
         HKEY hRunKey = nullptr;
-        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &hRunKey) == ERROR_SUCCESS) {
-            RegDeleteValueW(hRunKey, L"Perdanga11");
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &hRunKey, nullptr) == ERROR_SUCCESS) {
+            if (enable && !exePath.empty()) {
+                std::wstring cmd = L"\"" + exePath + L"\" --autostart";
+                RegSetValueExW(hRunKey, L"Perdanga11", 0, REG_SZ, (const BYTE*)cmd.c_str(), (DWORD)((cmd.length() + 1) * sizeof(wchar_t)));
+            } else {
+                RegDeleteValueW(hRunKey, L"Perdanga11");
+            }
             RegCloseKey(hRunKey);
         }
 
-        if (enable) {
-            std::wstring exePath = GetExecutablePath();
-            IShellLinkW* psl = nullptr;
-            if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, (void**)&psl))) {
-                psl->SetPath(exePath.c_str());
-                std::wstring workDir = exePath.substr(0, exePath.find_last_of(L"\\/"));
-                psl->SetWorkingDirectory(workDir.c_str());
-                psl->SetIconLocation(exePath.c_str(), 0);
+        HKEY hKeySerialize = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Serialize", 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &hKeySerialize, nullptr) == ERROR_SUCCESS) {
+            if (enable) {
+                DWORD zero = 0;
+                RegSetValueExW(hKeySerialize, L"StartupDelayInMSec", 0, REG_DWORD, (const BYTE*)&zero, sizeof(DWORD));
+            }
+            RegCloseKey(hKeySerialize);
+        }
 
-                IPersistFile* ppf = nullptr;
-                if (SUCCEEDED(psl->QueryInterface(IID_IPersistFile, (void**)&ppf))) {
-                    ppf->Save(shortcutPath.c_str(), TRUE);
-                    ppf->Release();
+        if (enable) {
+            if (!shortcutPath.empty() && !exePath.empty()) {
+                IShellLinkW* psl = nullptr;
+                if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, (void**)&psl))) {
+                    psl->SetPath(exePath.c_str());
+                    psl->SetArguments(L"--autostart");
+                    std::wstring workDir = exePath.substr(0, exePath.find_last_of(L"\\/"));
+                    psl->SetWorkingDirectory(workDir.c_str());
+                    psl->SetIconLocation(exePath.c_str(), 0);
+
+                    IPersistFile* ppf = nullptr;
+                    if (SUCCEEDED(psl->QueryInterface(IID_IPersistFile, (void**)&ppf))) {
+                        ppf->Save(shortcutPath.c_str(), TRUE);
+                        ppf->Release();
+                    }
+                    psl->Release();
                 }
-                psl->Release();
             }
         } else {
-            DeleteFileW(shortcutPath.c_str());
+            if (!shortcutPath.empty()) {
+                DeleteFileW(shortcutPath.c_str());
+            }
         }
     }
 

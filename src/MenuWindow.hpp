@@ -41,15 +41,20 @@ public:
                 g_hSearchEdit = CreateWindowExW(
                     0, L"EDIT", L"",
                     WS_CHILD | WS_VISIBLE | ES_LEFT | ES_AUTOHSCROLL,
-                    78, 28, MENU_WIDTH - 136, 22,
+                    86, 29, MENU_WIDTH - 150, 20,
                     hwnd, (HMENU)ID_SEARCH_BOX, GetModuleHandle(nullptr), nullptr
                 );
 
                 SendMessageW(g_hSearchEdit, WM_SETFONT, (WPARAM)g_hFontSearch, TRUE);
                 SetWindowSubclass(g_hSearchEdit, SearchEditSubclass, 0, 0);
 
+                const wchar_t* cueText = Config::IsRussian()
+                    ? L"\x041F\x043E\x0438\x0441\x043A \x043F\x0440\x0438\x043B\x043E\x0436\x0435\x043D\x0438\x0439 \x0438 \x0444\x0430\x0439\x043B\x043E\x0432..."
+                    : L"Type here to search...";
+                SendMessageW(g_hSearchEdit, EM_SETCUEBANNER, FALSE, (LPARAM)cueText);
+
                 SetTimer(hwnd, TIMER_UPDATE_RECT, 2500, nullptr);
-                SetTimer(hwnd, TIMER_BLOCK_START, 100, Hooks::NativeStartWatchdogTimer);
+                SetTimer(hwnd, TIMER_INIT_TASKBAR_POLL, 200, nullptr);
                 return 0;
             }
 
@@ -130,12 +135,13 @@ public:
                 return 0;
             }
 
-            case WM_CTLCOLOREDIT: {
+            case WM_CTLCOLOREDIT:
+            case WM_CTLCOLORSTATIC: {
                 HDC hdcEdit = (HDC)wParam;
                 bool isDark = Config::IsDarkMode();
                 SetTextColor(hdcEdit, isDark ? RGB(255, 255, 255) : RGB(20, 20, 20));
-                SetBkColor(hdcEdit, isDark ? RGB(38, 38, 38) : RGB(255, 255, 255));
-                static HBRUSH hbrDark = CreateSolidBrush(RGB(38, 38, 38));
+                SetBkColor(hdcEdit, isDark ? RGB(34, 34, 34) : RGB(255, 255, 255));
+                static HBRUSH hbrDark = CreateSolidBrush(RGB(34, 34, 34));
                 static HBRUSH hbrLight = CreateSolidBrush(RGB(255, 255, 255));
                 return (LRESULT)(isDark ? hbrDark : hbrLight);
             }
@@ -145,6 +151,11 @@ public:
                     StepAnimation();
                 } else if (wParam == TIMER_UPDATE_RECT) {
                     Hooks::UpdateStartButtonRect();
+                } else if (wParam == TIMER_INIT_TASKBAR_POLL) {
+                    Hooks::UpdateStartButtonRect(true);
+                    if ((Hooks::g_startButtonRect.right - Hooks::g_startButtonRect.left) > 0) {
+                        KillTimer(hwnd, TIMER_INIT_TASKBAR_POLL);
+                    }
                 } else if (wParam == TIMER_RECT_DEBOUNCE) {
                     KillTimer(hwnd, TIMER_RECT_DEBOUNCE);
                     Hooks::UpdateStartButtonRect();
@@ -187,11 +198,16 @@ public:
             }
 
             case WM_COMMAND: {
-                if (LOWORD(wParam) == ID_SEARCH_BOX && HIWORD(wParam) == EN_CHANGE) {
-                    g_scrollY = 0;
-                    g_showTooltip = false;
-                    KillTimer(hwnd, TIMER_HOVER_TOOLTIP);
-                    TriggerSearch();
+                if (LOWORD(wParam) == ID_SEARCH_BOX) {
+                    if (HIWORD(wParam) == EN_CHANGE) {
+                        g_scrollY = 0;
+                        g_showTooltip = false;
+                        KillTimer(hwnd, TIMER_HOVER_TOOLTIP);
+                        TriggerSearch();
+                    } else if (HIWORD(wParam) == EN_SETFOCUS || HIWORD(wParam) == EN_KILLFOCUS) {
+                        RECT rcSearch = { 50, 18, MENU_WIDTH - 50, 56 };
+                        InvalidateRect(hwnd, &rcSearch, FALSE);
+                    }
                 }
                 return 0;
             }
@@ -216,7 +232,7 @@ public:
                 g_showTooltip = false;
                 KillTimer(hwnd, TIMER_HOVER_TOOLTIP);
 
-                if (pt.x >= 36 && pt.x <= (MENU_WIDTH - 36) && pt.y >= 18 && pt.y <= 56) {
+                if (pt.x >= 52 && pt.x <= (MENU_WIDTH - 52) && pt.y >= 20 && pt.y <= 54) {
                     if (GetFocus() != g_hSearchEdit) {
                         SetFocus(g_hSearchEdit);
                     }
@@ -326,7 +342,9 @@ public:
                     bool hov = inTabStrip && PtInRect(&tab.rect, pt);
                     if (hov != tab.hovered) {
                         tab.hovered = hov;
-                        InvalidateRect(hwnd, &tab.rect, FALSE);
+                        RECT r = tab.rect;
+                        InflateRect(&r, 4, 4);
+                        InvalidateRect(hwnd, &r, FALSE);
                     }
                 }
 
@@ -665,11 +683,12 @@ public:
                 }
 
                 if (g_hoveredIndex >= 0 && g_hoveredIndex < (int)g_displayItems.size()) {
+                    g_justLaunchedTime = GetTickCount();
+                    g_justLaunchedIndex = g_hoveredIndex;
+                    Hooks::DismissNativeShellOverlays();
                     MenuInteraction::ExecuteApp(g_displayItems[g_hoveredIndex], false);
                     if (isShiftHeld) {
                         g_suppressCloseOnDeactivate = true;
-                        g_justLaunchedIndex = g_hoveredIndex;
-                        g_justLaunchedTime = GetTickCount();
                         SetTimer(hwnd, TIMER_LAUNCH_FLASH, 500, nullptr);
                         SetTimer(hwnd, TIMER_RESET_DEACTIVATE, 600, nullptr);
                         SetWindowPos(g_hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -698,6 +717,9 @@ public:
                 Gdiplus::Graphics g(memDC);
                 g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
                 g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+                g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+                g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+                g.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
 
                 MenuRenderer::DrawBackground(g, rc);
 
@@ -817,7 +839,8 @@ inline void CALLBACK Hooks::WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, 
 
     if (IsNativeStartWindow(hwnd)) {
         ShowWindow(hwnd, SW_HIDE);
-        if (!MenuWindow::g_isVisible) {
+        SetWindowPos(hwnd, nullptr, -32000, -32000, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER);
+        if (!MenuWindow::g_isVisible && (GetTickCount() - MenuState::g_justLaunchedTime >= 1800)) {
             PostMessageW(g_hTargetWnd, WM_APP_NATIVE_START_OPENED, 0, 0);
         }
         return;
@@ -832,7 +855,8 @@ inline void CALLBACK Hooks::WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, 
 
     wchar_t className[256] = { 0 };
     GetClassNameW(hwnd, className, 256);
-    if (wcscmp(className, L"Windows.UI.Core.CoreWindow") != 0) return;
+    if (wcscmp(className, L"Windows.UI.Core.CoreWindow") != 0 &&
+        wcscmp(className, L"XamlExplorerHostIslandWindow") != 0) return;
 
     wchar_t title[256] = { 0 };
     GetWindowTextW(hwnd, title, 256);
@@ -846,7 +870,8 @@ inline void CALLBACK Hooks::WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, 
 
     if (wcscmp(title, L"Start") == 0 || wcscmp(title, L"\x041F\x0443\x0441\x043A") == 0) {
         ShowWindow(hwnd, SW_HIDE);
-        if (!MenuWindow::g_isVisible) {
+        SetWindowPos(hwnd, nullptr, -32000, -32000, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER);
+        if (!MenuWindow::g_isVisible && (GetTickCount() - MenuState::g_justLaunchedTime >= 1800)) {
             PostMessageW(g_hTargetWnd, WM_APP_NATIVE_START_OPENED, 0, 0);
         }
     }
@@ -859,13 +884,10 @@ inline void CALLBACK Hooks::NativeStartWatchdogTimer(HWND, UINT, UINT_PTR, DWORD
 inline BOOL CALLBACK Hooks::NativeStartWatchdogEnumProc(HWND hwnd, LPARAM) {
     if (!IsWindowVisible(hwnd)) return TRUE;
 
-    wchar_t className[64] = { 0 };
-    GetClassNameW(hwnd, className, 64);
-    if (wcscmp(className, L"Windows.UI.Core.CoreWindow") != 0) return TRUE;
-
     if (IsNativeStartWindow(hwnd)) {
         ShowWindow(hwnd, SW_HIDE);
-        if (!MenuWindow::g_isVisible) {
+        SetWindowPos(hwnd, nullptr, -32000, -32000, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER);
+        if (!MenuWindow::g_isVisible && (GetTickCount() - MenuState::g_justLaunchedTime >= 1800)) {
             PostMessageW(g_hTargetWnd, WM_APP_NATIVE_START_OPENED, 0, 0);
         }
         return TRUE;
@@ -878,6 +900,27 @@ inline BOOL CALLBACK Hooks::NativeStartWatchdogEnumProc(HWND hwnd, LPARAM) {
         return TRUE;
     }
 
+    wchar_t className[64] = { 0 };
+    GetClassNameW(hwnd, className, 64);
+    if (wcscmp(className, L"Windows.UI.Core.CoreWindow") == 0 ||
+        wcscmp(className, L"XamlExplorerHostIslandWindow") == 0) {
+        wchar_t title[64] = { 0 };
+        GetWindowTextW(hwnd, title, 64);
+        if (wcscmp(title, L"Search") == 0 || wcscmp(title, L"\x041F\x043E\x0438\x0441\x043A") == 0) {
+            if (MenuWindow::g_isVisible) {
+                PostMessageW(g_hTargetWnd, WM_APP_CLOSE_MENU, 0, 0);
+            }
+            return TRUE;
+        }
+        if (wcscmp(title, L"Start") == 0 || wcscmp(title, L"\x041F\x0443\x0441\x043A") == 0) {
+            ShowWindow(hwnd, SW_HIDE);
+            SetWindowPos(hwnd, nullptr, -32000, -32000, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER);
+            if (!MenuWindow::g_isVisible && (GetTickCount() - MenuState::g_justLaunchedTime >= 1800)) {
+                PostMessageW(g_hTargetWnd, WM_APP_NATIVE_START_OPENED, 0, 0);
+            }
+        }
+    }
+
     return TRUE;
 }
 
@@ -885,6 +928,14 @@ inline LRESULT CALLBACK Hooks::LowLevelMouseProc(int nCode, WPARAM wParam, LPARA
     if (nCode == HC_ACTION) {
         MSLLHOOKSTRUCT* pMouse = (MSLLHOOKSTRUCT*)lParam;
         POINT pt = pMouse->pt;
+
+        bool isOverSearch = false;
+        if ((g_searchButtonRect.right - g_searchButtonRect.left) > 0 &&
+            (g_searchButtonRect.bottom - g_searchButtonRect.top) > 0) {
+            if (PtInRect(&g_searchButtonRect, pt)) {
+                isOverSearch = true;
+            }
+        }
 
         if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN || wParam == WM_NCLBUTTONDOWN || wParam == WM_NCRBUTTONDOWN) {
             if (MenuWindow::g_isVisible) {
@@ -897,10 +948,19 @@ inline LRESULT CALLBACK Hooks::LowLevelMouseProc(int nCode, WPARAM wParam, LPARA
                                   MenuWindow::g_targetY + MenuWindow::MENU_HEIGHT };
 
                 if (!PtInRect(&menuRect, pt)) {
+                    if (isOverSearch) {
+                        PostMessageW(g_hTargetWnd, WM_APP_CLOSE_MENU, 0, 0);
+                        return CallNextHookEx(g_hMouseHook, nCode, wParam, lParam);
+                    }
+
                     RECT startHit = g_startButtonRect;
                     startHit.left -= 4;
                     startHit.top -= 4;
-                    startHit.right += 4;
+                    if ((g_searchButtonRect.right - g_searchButtonRect.left) > 0 && g_searchButtonRect.left >= g_startButtonRect.left) {
+                        startHit.right = (std::min)(g_startButtonRect.right, g_searchButtonRect.left);
+                    } else {
+                        startHit.right = g_startButtonRect.right;
+                    }
                     startHit.bottom += 4;
 
                     if (PtInRect(&startHit, pt) && IsCursorDirectlyOnTaskbar(pt)) {
@@ -914,11 +974,24 @@ inline LRESULT CALLBACK Hooks::LowLevelMouseProc(int nCode, WPARAM wParam, LPARA
             }
         }
 
-        if (IsCursorDirectlyOnTaskbar(pt) && !IsForegroundFullScreen(pt)) {
+        if (IsCursorDirectlyOnTaskbar(pt)) {
+            if (isOverSearch) {
+                if (wParam == WM_LBUTTONDOWN || wParam == WM_NCLBUTTONDOWN) {
+                    if (MenuWindow::g_isVisible) {
+                        PostMessageW(g_hTargetWnd, WM_APP_CLOSE_MENU, 0, 0);
+                    }
+                }
+                return CallNextHookEx(g_hMouseHook, nCode, wParam, lParam);
+            }
+
             RECT hitArea = g_startButtonRect;
             hitArea.left -= 4;
             hitArea.top -= 4;
-            hitArea.right += 4;
+            if ((g_searchButtonRect.right - g_searchButtonRect.left) > 0 && g_searchButtonRect.left >= g_startButtonRect.left) {
+                hitArea.right = (std::min)(g_startButtonRect.right, g_searchButtonRect.left);
+            } else {
+                hitArea.right = g_startButtonRect.right;
+            }
             hitArea.bottom += 4;
 
             if (wParam == WM_LBUTTONDOWN || wParam == WM_NCLBUTTONDOWN) {

@@ -116,6 +116,15 @@ LRESULT CALLBACK SubclassedTrayProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    bool isAutostart = false;
+    if (argc >= 2) {
+        for (int i = 1; i < argc; ++i) {
+            if (_wcsicmp(argv[i], L"--autostart") == 0 || _wcsicmp(argv[i], L"-autostart") == 0) {
+                isAutostart = true;
+                break;
+            }
+        }
+    }
     if (argc >= 3 && _wcsicmp(argv[1], L"--pin") == 0) {
         std::wstring targetPath = argv[2];
         LocalFree(argv);
@@ -158,9 +167,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"Perdanga11_SingleInstanceMutex");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        HWND existingWnd = FindWindowW(L"Perdanga11WindowClass", nullptr);
-        if (existingWnd) {
-            PostMessageW(existingWnd, WM_APP_TOGGLE_MENU, 0, 0);
+        if (!isAutostart && GetTickCount64() > 60000) {
+            HWND existingWnd = FindWindowW(L"Perdanga11WindowClass", nullptr);
+            if (existingWnd) {
+                PostMessageW(existingWnd, WM_APP_TOGGLE_MENU, 0, 0);
+            }
         }
         return 0;
     }
@@ -171,10 +182,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     ULONG_PTR gdiplusToken = 0;
     Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
 
-    Config::RegisterShellContextMenu();
+    std::thread([]() {
+        Config::RegisterShellContextMenu();
+    }).detach();
 
     HWND hMainWnd = MenuWindow::Create(hInstance);
     AllowCrossIntegrityMessages(hMainWnd);
+    Hooks::Install(hMainWnd, hInstance);
+
     Config::StartAsyncIndexing(hMainWnd);
 
     ZeroMemory(&g_nid, sizeof(NOTIFYICONDATAW));
@@ -192,8 +207,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     LONG_PTR prevProc = SetWindowLongPtrW(hMainWnd, GWLP_WNDPROC, (LONG_PTR)SubclassedTrayProc);
     SetWindowLongPtrW(hMainWnd, GWLP_USERDATA, prevProc);
-
-    Hooks::Install(hMainWnd, hInstance);
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {

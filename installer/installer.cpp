@@ -111,7 +111,7 @@ static void RegisterUninstallEntry(const std::wstring& installDir, const std::ws
     if (RegCreateKeyExW(HKEY_CURRENT_USER, subKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
         std::wstring uninstallerCmd = L"\"" + installDir + L"\\Uninstall.exe\" --uninstall";
         const wchar_t* displayName = L"Perdanga11";
-        const wchar_t* displayVer = L"1.1";
+        const wchar_t* displayVer = L"1.4";
         const wchar_t* publisher = L"Perdanga";
 
         RegSetValueExW(hKey, L"DisplayName", 0, REG_SZ, (const BYTE*)displayName, (DWORD)((wcslen(displayName) + 1) * sizeof(wchar_t)));

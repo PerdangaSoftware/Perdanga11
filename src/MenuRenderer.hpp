@@ -22,6 +22,7 @@ public:
     static inline Gdiplus::FontFamily* g_pGlyphFamily = nullptr;
 
     static inline Gdiplus::Font* g_pTitleFont = nullptr;
+    static inline Gdiplus::Font* g_pTabActiveFont = nullptr;
     static inline Gdiplus::Font* g_pTabInactiveFont = nullptr;
     static inline Gdiplus::Font* g_pTileFont = nullptr;
     static inline Gdiplus::Font* g_pAllAppsFont = nullptr;
@@ -59,6 +60,7 @@ public:
         }
 
         g_pTitleFont = new Gdiplus::Font(g_pFontDisplay, 12.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
+        g_pTabActiveFont = new Gdiplus::Font(g_pFontDisplay, 11.5f, Gdiplus::FontStyleBold, Gdiplus::UnitPoint);
         g_pTabInactiveFont = new Gdiplus::Font(g_pFontDisplay, 11.5f, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
         g_pAllAppsFont = new Gdiplus::Font(g_pFontDisplay, 10.2f, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
 
@@ -76,6 +78,7 @@ public:
 
     static void FreeFonts() {
         delete g_pTitleFont;
+        delete g_pTabActiveFont;
         delete g_pTabInactiveFont;
         delete g_pAllAppsFont;
         delete g_pTileFont;
@@ -103,25 +106,25 @@ public:
     }
 
     static Gdiplus::Color GetThemeBgColor() {
-        return Config::IsDarkMode() ? Gdiplus::Color(255, 32, 32, 32) : Gdiplus::Color(255, 243, 243, 246);
+        return Config::IsDarkMode() ? Gdiplus::Color(255, 27, 27, 27) : Gdiplus::Color(255, 246, 246, 248);
     }
     static Gdiplus::Color GetSearchBgColor() {
-        return Config::IsDarkMode() ? Gdiplus::Color(255, 38, 38, 38) : Gdiplus::Color(255, 255, 255, 255);
+        return Config::IsDarkMode() ? Gdiplus::Color(255, 34, 34, 34) : Gdiplus::Color(255, 255, 255, 255);
     }
     static Gdiplus::Color GetCardBgColor() {
-        return Config::IsDarkMode() ? Gdiplus::Color(255, 42, 42, 42) : Gdiplus::Color(255, 255, 255, 255);
+        return Config::IsDarkMode() ? Gdiplus::Color(255, 36, 36, 36) : Gdiplus::Color(255, 255, 255, 255);
     }
     static Gdiplus::Color GetTextPrimaryColor() {
-        return Config::IsDarkMode() ? Gdiplus::Color(255, 255, 255, 255) : Gdiplus::Color(255, 25, 25, 25);
+        return Config::IsDarkMode() ? Gdiplus::Color(255, 255, 255, 255) : Gdiplus::Color(255, 20, 20, 20);
     }
     static Gdiplus::Color GetTextSecondaryColor() {
-        return Config::IsDarkMode() ? Gdiplus::Color(255, 160, 160, 160) : Gdiplus::Color(255, 115, 115, 122);
+        return Config::IsDarkMode() ? Gdiplus::Color(255, 145, 145, 145) : Gdiplus::Color(255, 115, 115, 120);
     }
     static Gdiplus::Color GetHoverColor() {
-        return Config::IsDarkMode() ? Gdiplus::Color(255, 50, 50, 50) : Gdiplus::Color(255, 230, 230, 234);
+        return Config::IsDarkMode() ? Gdiplus::Color(18, 255, 255, 255) : Gdiplus::Color(14, 0, 0, 0);
     }
     static Gdiplus::Color GetBorderColor() {
-        return Config::IsDarkMode() ? Gdiplus::Color(255, 52, 52, 52) : Gdiplus::Color(160, 215, 215, 220);
+        return Config::IsDarkMode() ? Gdiplus::Color(25, 255, 255, 255) : Gdiplus::Color(20, 0, 0, 0);
     }
 
     static void DrawBackground(Gdiplus::Graphics& g, const RECT& rc) {
@@ -130,28 +133,32 @@ public:
     }
 
     static void DrawSearchBar(Gdiplus::Graphics& g, const RECT& rc, bool hasSearchText, bool editHasFocus) {
-        float padX = 36.0f;
-        float padY = 18.0f;
-        float h = 38.0f;
+        float padX = 52.0f;
+        float padY = 20.0f;
+        float h = 34.0f;
         Gdiplus::RectF searchRect(padX, padY, (float)rc.right - padX * 2.0f, h);
         Gdiplus::GraphicsPath searchPath;
-        AddRoundedRectToPath(searchPath, searchRect, h / 2.0f);
+        AddRoundedRectToPath(searchPath, searchRect, 7.0f);
 
         Gdiplus::SolidBrush searchBg(GetSearchBgColor());
         g.FillPath(&searchBg, &searchPath);
 
         Gdiplus::Color borderCol = editHasFocus
-            ? (Config::IsDarkMode() ? Gdiplus::Color(220, 0, 120, 215) : Gdiplus::Color(220, 0, 103, 192))
-            : (Config::IsDarkMode() ? Gdiplus::Color(180, 56, 56, 56) : Gdiplus::Color(160, 215, 215, 220));
+            ? (Config::IsDarkMode() ? Gdiplus::Color(160, 96, 175, 255) : Gdiplus::Color(160, 0, 103, 192))
+            : (Config::IsDarkMode() ? Gdiplus::Color(28, 255, 255, 255) : Gdiplus::Color(20, 0, 0, 0));
 
-        Gdiplus::Pen searchPen(borderCol, editHasFocus ? 1.4f : 1.0f);
+        Gdiplus::Pen searchPen(borderCol, 1.0f);
         g.DrawPath(&searchPen, &searchPath);
 
-        float magD = 11.5f;
-        float magX = 52.0f;
+        float magD = 12.0f;
+        float magX = padX + 13.0f;
         float magY = searchRect.Y + (searchRect.Height - magD) / 2.0f;
 
-        Gdiplus::Pen magPen(Gdiplus::Color(255, 0, 0, 0), 1.8f);
+        Gdiplus::Color magColor = editHasFocus
+            ? (Config::IsDarkMode() ? Gdiplus::Color(255, 96, 175, 255) : Gdiplus::Color(255, 0, 103, 192))
+            : GetTextSecondaryColor();
+
+        Gdiplus::Pen magPen(magColor, 1.6f);
         magPen.SetStartCap(Gdiplus::LineCapRound);
         magPen.SetEndCap(Gdiplus::LineCapRound);
 
@@ -162,7 +169,7 @@ public:
         float cy = magY + r;
         float startX = cx + r * 0.7071f;
         float startY = cy + r * 0.7071f;
-        float handleLen = 4.5f;
+        float handleLen = 4.0f;
         g.DrawLine(&magPen, startX, startY, startX + handleLen, startY + handleLen);
     }
 
@@ -184,15 +191,29 @@ public:
         if (hasTabOverflow && scrollLeftRect.right > scrollLeftRect.left) {
             bool canScrollLeft = (tabScrollX > 0);
             Gdiplus::RectF leftF((float)scrollLeftRect.left, (float)scrollLeftRect.top, (float)(scrollLeftRect.right - scrollLeftRect.left), (float)(scrollLeftRect.bottom - scrollLeftRect.top));
+            leftF.Inflate(-2.0f, -3.0f);
+            if (scrollLeftHovered && canScrollLeft) {
+                Gdiplus::GraphicsPath p;
+                AddRoundedRectToPath(p, leftF, 6.0f);
+                Gdiplus::SolidBrush hovB(GetHoverColor());
+                g.FillPath(&hovB, &p);
+            }
             Gdiplus::SolidBrush arrBrush(canScrollLeft ? (scrollLeftHovered ? GetTextPrimaryColor() : GetTextSecondaryColor()) : Gdiplus::Color(60, 128, 128, 128));
-            g.DrawString(L"<", -1, g_pTitleFont, leftF, &centerFormat, &arrBrush);
+            g.DrawString(L"\xE76B", -1, g_pGlyphFont, leftF, &centerFormat, &arrBrush);
         }
 
         if (hasTabOverflow && scrollRightRect.right > scrollRightRect.left) {
             bool canScrollRight = (tabScrollX < maxTabScrollX);
             Gdiplus::RectF rightF((float)scrollRightRect.left, (float)scrollRightRect.top, (float)(scrollRightRect.right - scrollRightRect.left), (float)(scrollRightRect.bottom - scrollRightRect.top));
+            rightF.Inflate(-2.0f, -3.0f);
+            if (scrollRightHovered && canScrollRight) {
+                Gdiplus::GraphicsPath p;
+                AddRoundedRectToPath(p, rightF, 6.0f);
+                Gdiplus::SolidBrush hovB(GetHoverColor());
+                g.FillPath(&hovB, &p);
+            }
             Gdiplus::SolidBrush arrBrush(canScrollRight ? (scrollRightHovered ? GetTextPrimaryColor() : GetTextSecondaryColor()) : Gdiplus::Color(60, 128, 128, 128));
-            g.DrawString(L">", -1, g_pTitleFont, rightF, &centerFormat, &arrBrush);
+            g.DrawString(L"\xE76C", -1, g_pGlyphFont, rightF, &centerFormat, &arrBrush);
         }
 
         for (size_t i = 0; i < tabs.size(); ++i) {
@@ -207,28 +228,52 @@ public:
 
             if (rectF.X + rectF.Width < (float)tabClipLeft || rectF.X > (float)tabClipRight) continue;
 
+            Gdiplus::RectF pillRect = rectF;
+            pillRect.Inflate(-2.0f, -3.0f);
+
+            if (hovered) {
+                Gdiplus::GraphicsPath pill;
+                AddRoundedRectToPath(pill, pillRect, 6.0f);
+                Gdiplus::SolidBrush hovBrush(GetHoverColor());
+                g.FillPath(&hovBrush, &pill);
+            }
+
             std::wstring label = Config::GetTabDisplayName(tabs[i]);
 
             Gdiplus::Color textColor;
             if (active) {
-                textColor = GetTextPrimaryColor();
+                textColor = Config::IsDarkMode() ? Gdiplus::Color(255, 255, 255, 255) : Gdiplus::Color(255, 20, 20, 20);
             } else if (hovered) {
-                textColor = Config::IsDarkMode() ? Gdiplus::Color(255, 235, 235, 235) : Gdiplus::Color(255, 30, 30, 30);
+                textColor = Config::IsDarkMode() ? Gdiplus::Color(255, 225, 225, 225) : Gdiplus::Color(255, 35, 35, 35);
             } else {
                 textColor = GetTextSecondaryColor();
             }
 
             Gdiplus::SolidBrush textBrush(textColor);
-            g.DrawString(label.c_str(), -1, active ? g_pTitleFont : g_pTabInactiveFont, rectF, &centerFormat, &textBrush);
+            g.DrawString(label.c_str(), -1, active ? g_pTabActiveFont : g_pTabInactiveFont, rectF, &centerFormat, &textBrush);
         }
 
         if (addTabRect.right > addTabRect.left) {
             Gdiplus::RectF addRectF((float)addTabRect.left, (float)addTabRect.top, (float)(addTabRect.right - addTabRect.left), (float)(addTabRect.bottom - addTabRect.top));
+            addRectF.Inflate(-2.0f, -3.0f);
+            if (addTabHovered) {
+                Gdiplus::GraphicsPath pill;
+                AddRoundedRectToPath(pill, addRectF, 6.0f);
+                Gdiplus::SolidBrush hovBrush(GetHoverColor());
+                g.FillPath(&hovBrush, &pill);
+            }
             Gdiplus::SolidBrush addGlyphBrush(addTabHovered ? GetTextPrimaryColor() : GetTextSecondaryColor());
-            g.DrawString(L"+", -1, g_pTitleFont, addRectF, &centerFormat, &addGlyphBrush);
+            g.DrawString(L"\xE710", -1, g_pGlyphFont, addRectF, &centerFormat, &addGlyphBrush);
         }
 
         Gdiplus::RectF togRectF((float)toggleRect.left, (float)toggleRect.top, (float)(toggleRect.right - toggleRect.left), (float)(toggleRect.bottom - toggleRect.top));
+        togRectF.Inflate(-2.0f, -3.0f);
+        if (toggleHov) {
+            Gdiplus::GraphicsPath pill;
+            AddRoundedRectToPath(pill, togRectF, 6.0f);
+            Gdiplus::SolidBrush hovBrush(GetHoverColor());
+            g.FillPath(&hovBrush, &pill);
+        }
 
         const wchar_t* btnText = isAllAppsMode
             ? (Config::IsRussian() ? L"< \x041D\x0430\x0437\x0430\x0434" : L"< Back")
@@ -245,8 +290,8 @@ public:
                               const RECT& dwnRect, bool dwnHovered) {
         float footerY = (float)rc.bottom - 52.0f;
 
-        Gdiplus::Pen divPen(GetBorderColor(), 1.0f);
-        g.DrawLine(&divPen, 0.0f, footerY, (float)rc.right, footerY);
+        Gdiplus::Pen divPen(Config::IsDarkMode() ? Gdiplus::Color(20, 255, 255, 255) : Gdiplus::Color(15, 0, 0, 0), 1.0f);
+        g.DrawLine(&divPen, 40.0f, footerY, (float)rc.right - 40.0f, footerY);
 
         Gdiplus::StringFormat centerFormat;
         centerFormat.SetAlignment(Gdiplus::StringAlignmentCenter);
@@ -256,7 +301,7 @@ public:
             Gdiplus::RectF btnRect((float)r.left, (float)r.top, (float)(r.right - r.left), (float)(r.bottom - r.top));
             if (hovered) {
                 Gdiplus::GraphicsPath path;
-                AddRoundedRectToPath(path, btnRect, 8.0f);
+                AddRoundedRectToPath(path, btnRect, 7.0f);
                 Gdiplus::SolidBrush hovBrush(GetHoverColor());
                 g.FillPath(&hovBrush, &path);
             }
@@ -273,12 +318,15 @@ public:
     static void DrawPowerFlyoutUpward(Gdiplus::Graphics& g, const RECT& flyoutRect, int hoverIndex) {
         Gdiplus::RectF flyoutRectF((float)flyoutRect.left, (float)flyoutRect.top, (float)(flyoutRect.right - flyoutRect.left), (float)(flyoutRect.bottom - flyoutRect.top));
 
-        Gdiplus::GraphicsPath shadowPath;
-        Gdiplus::RectF shadowRectF = flyoutRectF;
-        shadowRectF.Inflate(2.0f, 2.0f);
-        AddRoundedRectToPath(shadowPath, shadowRectF, 12.0f);
-        Gdiplus::SolidBrush shadowBrush(Gdiplus::Color(100, 0, 0, 0));
-        g.FillPath(&shadowBrush, &shadowPath);
+        for (int s = 3; s >= 1; --s) {
+            Gdiplus::GraphicsPath shadowPath;
+            Gdiplus::RectF shadowRectF = flyoutRectF;
+            shadowRectF.Offset(0.0f, (float)s * 1.5f);
+            shadowRectF.Inflate((float)s * 1.2f, (float)s * 1.2f);
+            AddRoundedRectToPath(shadowPath, shadowRectF, 10.0f + (float)s * 1.5f);
+            Gdiplus::SolidBrush shadowBrush(Config::IsDarkMode() ? Gdiplus::Color(28, 0, 0, 0) : Gdiplus::Color(16, 0, 0, 0));
+            g.FillPath(&shadowBrush, &shadowPath);
+        }
 
         Gdiplus::GraphicsPath cardPath;
         AddRoundedRectToPath(cardPath, flyoutRectF, 10.0f);
@@ -346,11 +394,15 @@ public:
         centerFormat.SetAlignment(Gdiplus::StringAlignmentCenter);
         centerFormat.SetLineAlignment(Gdiplus::StringAlignmentCenter);
 
-        Gdiplus::SolidBrush primaryBrush(GetTextPrimaryColor());
-        Gdiplus::RectF label1(emptyCard.X, emptyCard.Y + 48, emptyCard.Width, 26);
-        Gdiplus::RectF label2(emptyCard.X, emptyCard.Y + 80, emptyCard.Width, 40);
+        Gdiplus::RectF iconRect(emptyCard.X, emptyCard.Y + 28, emptyCard.Width, 24);
+        Gdiplus::SolidBrush iconBrush(GetTextSecondaryColor());
+        g.DrawString(L"\xE721", -1, g_pFooterGlyphFont, iconRect, &centerFormat, &iconBrush);
 
-        const wchar_t* title = Config::IsRussian() ? L"\x042D\x043B\x0435\x043C\x0435\x043D\x0442\x044B \x043D\x0430\x0439\x0434\x0435\x043D\x044B" : L"No items found";
+        Gdiplus::SolidBrush primaryBrush(GetTextPrimaryColor());
+        Gdiplus::RectF label1(emptyCard.X, emptyCard.Y + 60, emptyCard.Width, 26);
+        Gdiplus::RectF label2(emptyCard.X, emptyCard.Y + 92, emptyCard.Width, 40);
+
+        const wchar_t* title = Config::IsRussian() ? L"\x042D\x043B\x0435\x043C\x0435\x043D\x0442\x044B \x043D\x0435 \x043D\x0430\x0439\x0434\x0435\x043D\x044B" : L"No items found";
         const wchar_t* hint = Config::IsRussian()
             ? L"\x041D\x0430\x0436\x043C\x0438\x0442\x0435 \x043F\x0440\x0430\x0432\x043E\x0439 \x043A\x043D\x043E\x043F\x043A\x043E\x0439 \x043C\x044B\x0448\x0438, \x0447\x0442\x043E\x0431\x044B \x0437\x0430\x043A\x0440\x0435\x043F\x0438\x0442\x044C \x044D\x043B\x0435\x043C\x0435\x043D\x0442\x044B"
             : L"Right-click anywhere to pin items or create custom tabs";
@@ -420,30 +472,30 @@ public:
                 g.DrawPath(&flashPen, &launchPath);
             } else if ((int)i == hoveredIndex && !isDragging) {
                 Gdiplus::GraphicsPath tilePath;
-                AddRoundedRectToPath(tilePath, tileRect, 9.0f);
+                AddRoundedRectToPath(tilePath, tileRect, 8.0f);
 
                 if (Config::IsDarkMode()) {
                     Gdiplus::LinearGradientBrush hovFill(
                         tileRect,
-                        Gdiplus::Color(32, 255, 255, 255),
-                        Gdiplus::Color(16, 255, 255, 255),
+                        Gdiplus::Color(34, 255, 255, 255),
+                        Gdiplus::Color(18, 255, 255, 255),
                         Gdiplus::LinearGradientModeVertical
                     );
                     g.FillPath(&hovFill, &tilePath);
 
                     Gdiplus::LinearGradientBrush hovBorder(
                         tileRect,
-                        Gdiplus::Color(55, 255, 255, 255),
-                        Gdiplus::Color(18, 255, 255, 255),
+                        Gdiplus::Color(65, 255, 255, 255),
+                        Gdiplus::Color(24, 255, 255, 255),
                         Gdiplus::LinearGradientModeVertical
                     );
                     Gdiplus::Pen borderPen(&hovBorder, 1.0f);
                     g.DrawPath(&borderPen, &tilePath);
                 } else {
-                    Gdiplus::SolidBrush hovFill(Gdiplus::Color(15, 0, 0, 0));
+                    Gdiplus::SolidBrush hovFill(Gdiplus::Color(255, 255, 255, 255));
                     g.FillPath(&hovFill, &tilePath);
 
-                    Gdiplus::Pen borderPen(Gdiplus::Color(35, 0, 0, 0), 1.0f);
+                    Gdiplus::Pen borderPen(Gdiplus::Color(25, 0, 0, 0), 1.0f);
                     g.DrawPath(&borderPen, &tilePath);
                 }
             }
@@ -455,7 +507,9 @@ public:
             }
 
             bool isItemHovered = ((int)i == hoveredIndex && !isDragging);
-            Gdiplus::Color labelColor = isItemHovered ? Gdiplus::Color(255, 255, 255, 255) : GetTextPrimaryColor();
+            Gdiplus::Color labelColor = (isItemHovered && Config::IsDarkMode())
+                ? Gdiplus::Color(255, 255, 255, 255)
+                : GetTextPrimaryColor();
 
             Gdiplus::RectF labelRect((float)tileLeft + 4.0f, (float)tileTop + 44.0f, (float)cellWidth - 8.0f, 38.0f);
             Gdiplus::SolidBrush labelBrush(labelColor);
