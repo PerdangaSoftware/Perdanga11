@@ -114,7 +114,7 @@ clean.bat
 <br>
 
 <div align="center">
-  <img src="https://gitlab.com/perdanga/perdanga11/-/raw/main/assets/ico/perdanga11.ico?ref_type=heads" width="80" alt="perdanga11.ico"/>
+  <img src="https://raw.githubusercontent.com/PerdangaSoftware/Perdanga11/refs/heads/main/assets/ico/perdanga11.ico" width="80" alt="perdanga11.ico"/>
   <br><br>
   <h2>Perdanga Forever!</h2>
 </div>
