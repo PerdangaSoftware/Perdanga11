@@ -10,25 +10,18 @@
 
 <br/>
 
-<p align="center">
-  <img src="https://github.com/PerdangaSoftware/Perdanga11/blob/main/assets/Perdanga11menu.png?raw=true" width="415" alt="Start Menu Preview"/>
-  &nbsp;&nbsp;
-  <img src="https://github.com/PerdangaSoftware/Perdanga11/blob/main/assets/Perdanga11search.png?raw=true" width="415" alt="Search Preview"/>
-</p>
+<table align="center">
+  <tr>
+    <th align="center">Start Menu</th>
+    <th align="center">Instant Search</th>
+  </tr>
+  <tr>
+    <td align="center"><img src="https://github.com/PerdangaSoftware/Perdanga11/blob/main/assets/Perdanga11menu.png?raw=true" width="375" alt="Start Menu Preview"/></td>
+    <td align="center"><img src="https://github.com/PerdangaSoftware/Perdanga11/blob/main/assets/Perdanga11search.png?raw=true" width="375" alt="Instant Search Preview"/></td>
+  </tr>
+</table>
 
 </div>
-
-
-## Highlights & Features
-
-- **Fast Start:** Written entirely in pure native C++ with zero third-party dependencies.
-- **High-Performance Search:** Instant search across installed applications, user libraries, and connected drives with an ultra-lightweight virtual table.
-- **Custom Categorized Tabs:** Organize your workspace with customizable tabs (Pinned, Folders, Tools, Games, etc.). Drag-and-drop tiles to rearrange, rename tabs, or create new categories with a simple right-click.
-- **Consecutive Multi-Launch:** Launch multiple programs in succession without the menu auto-closing simply by holding `Shift` while clicking (or via middle mouse click). Standard single-click launches and dismisses immediately.
-- **Rich Fluent Tooltips:** Hovering any tile or search result displays an info card with resolved target path, file size, and last modified timestamp.
-- **Deep Shortcut Resolution:** Accurately resolves `.lnk` shortcuts to actual file targets for execution, location opening, and path copying.
-- **Native Explorer Pinning & SendTo:** Pin files, folders, and executables directly from Windows Explorer or the Desktop.
-- **Theme Support:** Automatically adapts to Windows 11 dark and light modes.
 
 
 ## 📂 Project Structure
