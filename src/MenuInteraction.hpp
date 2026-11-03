@@ -16,6 +16,7 @@
 #define ID_MENU_PIN_ACTION 3000
 #define ID_MENU_RUN_ADMIN 3001
 #define ID_MENU_OPEN_LOCATION 3002
+#define ID_MENU_COPY_PATH 3003
 #define ID_MENU_PIN_CUSTOM_FILE 3004
 #define ID_MENU_PIN_CUSTOM_DIR 3005
 
@@ -106,23 +107,24 @@ public:
         ShellExecuteW(nullptr, asAdmin ? L"runas" : L"open", item.target.c_str(), item.arguments.c_str(), nullptr, SW_SHOWNORMAL);
     }
 
-    static void OpenItemLocation(const AppItem& item) {
-        std::wstring target = item.target;
-        if (target.length() >= 2 && target.front() == L'"' && target.back() == L'"') {
-            target = target.substr(1, target.length() - 2);
-        }
-
-        size_t dotPos = target.find_last_of(L'.');
-        if (dotPos != std::wstring::npos && _wcsicmp(target.c_str() + dotPos, L".lnk") == 0) {
-            std::wstring iconPath;
-            int iconIdx = 0;
-            std::wstring resolved = AppIndexer::ResolveLnkTarget(target, iconPath, iconIdx);
-            if (!resolved.empty() && resolved != target) {
-                target = resolved;
+    static void CopyToClipboard(HWND hWnd, const std::wstring& text) {
+        if (!OpenClipboard(hWnd)) return;
+        EmptyClipboard();
+        size_t bytes = (text.length() + 1) * sizeof(wchar_t);
+        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if (hMem) {
+            void* pLock = GlobalLock(hMem);
+            if (pLock) {
+                memcpy(pLock, text.c_str(), bytes);
+                GlobalUnlock(hMem);
+                SetClipboardData(CF_UNICODETEXT, hMem);
             }
         }
+        CloseClipboard();
+    }
 
-        target = Config::ResolveAppPath(target);
+    static void OpenItemLocation(const AppItem& item) {
+        std::wstring target = AppIndexer::ResolveItemRealTargetPath(item);
         std::wstring param = L"/select,\"" + target + L"\"";
         ShellExecuteW(nullptr, L"open", L"explorer.exe", param.c_str(), nullptr, SW_SHOWNORMAL);
     }
@@ -444,12 +446,18 @@ public:
         AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hSubTabs, Config::IsRussian() ? L"\x0417\x0430\x043A\x0440\x0435\x043F\x0438\x0442\x044C \x0432\x043E \x0432\x043A\x043B\x0430\x0434\x043A\x0443" : L"Pin to tab");
 
         AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-        if (!targetItem.isDirectory) {
+        if (!targetItem.isDirectory && targetItem.target.rfind(L"shell:", 0) != 0 && targetItem.target.rfind(L"ms-", 0) != 0) {
             const wchar_t* adminText = Config::IsRussian() ? L"\x0417\x0430\x043F\x0443\x0441\x043A \x043E\x0442 \x0438\x043C\x0435\x043D\x0438 \x0430\x0434\x043C\x0438\x043D\x0438\x0441\x0442\x0440\x0430\x0442\x043E\x0440\x0430" : L"Run as administrator";
             AppendMenuW(hMenu, MF_STRING, ID_MENU_RUN_ADMIN, adminText);
         }
-        const wchar_t* locText = Config::IsRussian() ? L"\x041F\x0435\x0440\x0435\x0439\x0442\x0438 \x043A \x0440\x0430\x0441\x043F\x043E\x043B\x043E\x0436\x0435\x043D\x0438\x044E" : L"Open file location";
-        AppendMenuW(hMenu, MF_STRING, ID_MENU_OPEN_LOCATION, locText);
+        if (!targetItem.isDirectory && targetItem.target.rfind(L"shell:", 0) != 0 && targetItem.target.rfind(L"ms-", 0) != 0) {
+            const wchar_t* locText = Config::IsRussian() ? L"\x041F\x0435\x0440\x0435\x0439\x0442\x0438 \x043A \x0440\x0430\x0441\x043F\x043E\x043B\x043E\x0436\x0435\x043D\x0438\x044E" : L"Open file location";
+            AppendMenuW(hMenu, MF_STRING, ID_MENU_OPEN_LOCATION, locText);
+        }
+        if (targetItem.target.rfind(L"shell:", 0) != 0 && targetItem.target.rfind(L"ms-", 0) != 0) {
+            const wchar_t* copyPathText = Config::IsRussian() ? L"\x041A\x043E\x043F\x0438\x0440\x043E\x0432\x0430\x0442\x044C \x043F\x0443\x0442\x044C" : L"Copy path";
+            AppendMenuW(hMenu, MF_STRING, ID_MENU_COPY_PATH, copyPathText);
+        }
 
         int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hWnd, nullptr);
         DestroyMenu(hMenu);

@@ -114,6 +114,11 @@ LRESULT CALLBACK SubclassedTrayProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM 
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
+    HDESK hDefaultDesk = OpenDesktopW(L"Default", 0, FALSE, GENERIC_ALL);
+    if (hDefaultDesk) {
+        SetThreadDesktop(hDefaultDesk);
+        CloseDesktop(hDefaultDesk);
+    }
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     bool isAutostart = false;

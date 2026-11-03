@@ -1,5 +1,5 @@
 #define MyAppName "Perdanga11"
-#define MyAppVersion "1.4"
+#define MyAppVersion "1.5"
 #define MyAppPublisher "Perdanga Software"
 #define MyAppURL "https://github.com/PerdangaSoftware/Perdanga11"
 #define MyAppExeName "Perdanga11.exe"

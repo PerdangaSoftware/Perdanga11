@@ -33,6 +33,9 @@ struct AppItem {
     bool isDirectory = false;
     HICON hIcon = nullptr;
     int searchScore = 0;
+    std::wstring displayPath;
+    std::wstring sizeStr;
+    std::wstring dateStr;
 };
 
 struct TabDefinition {
@@ -46,10 +49,53 @@ struct TabDefinition {
     bool hovered = false;
 };
 
+struct CompactFileItem {
+    uint32_t dirId = 0;
+    std::wstring name;
+    uint64_t fileSize = 0;
+    FILETIME lastWriteTime = { 0, 0 };
+    bool isDirectory = false;
+};
+
+struct SearchResultEntry {
+    uint8_t source = 0;
+    uint32_t sourceIndex = 0;
+    int16_t score = 0;
+    bool isDirectory = false;
+};
+
+struct SearchPayload {
+    std::vector<AppItem> searchApps;
+    std::vector<SearchResultEntry> results;
+};
+
 struct IndexSnapshot {
     std::vector<AppItem> installedApps;
     std::vector<AppItem> frequentFolders;
-    std::vector<AppItem> userFiles;
+    std::vector<std::wstring> dirPool;
+    std::vector<CompactFileItem> userFiles;
+};
+
+class FastChar {
+public:
+    static inline wchar_t s_lowerTable[65536];
+    static inline bool s_initialized = false;
+
+    static void EnsureInit() {
+        if (!s_initialized) {
+            for (DWORD i = 0; i < 65536; ++i) {
+                wchar_t c = (wchar_t)i;
+                CharLowerBuffW(&c, 1);
+                s_lowerTable[i] = c;
+            }
+            s_initialized = true;
+        }
+    }
+
+    static inline wchar_t ToLower(wchar_t c) {
+        if (!s_initialized) EnsureInit();
+        return s_lowerTable[(uint16_t)c];
+    }
 };
 
 class Config {
@@ -81,6 +127,51 @@ public:
 
     static bool IsDarkMode() {
         return g_cachedDarkMode;
+    }
+
+    static void FormatFileSize(uint64_t bytes, wchar_t* outBuf, size_t bufSize) {
+        if (bytes < 1024) {
+            swprintf_s(outBuf, bufSize, Config::IsRussian() ? L"%llu \x0411" : L"%llu B", bytes);
+        } else if (bytes < 1024 * 1024) {
+            uint64_t kb = (bytes + 1023) / 1024;
+            swprintf_s(outBuf, bufSize, Config::IsRussian() ? L"%llu \x041A\x0411" : L"%llu KB", kb);
+        } else if (bytes < 1024ULL * 1024 * 1024) {
+            double mb = (double)bytes / (1024.0 * 1024.0);
+            swprintf_s(outBuf, bufSize, Config::IsRussian() ? L"%.1f \x041C\x0411" : L"%.1f MB", mb);
+        } else {
+            double gb = (double)bytes / (1024.0 * 1024.0 * 1024.0);
+            swprintf_s(outBuf, bufSize, Config::IsRussian() ? L"%.2f \x0413\x0411" : L"%.2f GB", gb);
+        }
+    }
+
+    static void FormatFileTime(const FILETIME& ft, wchar_t* outBuf, size_t bufSize, bool withTime = false) {
+        if (ft.dwLowDateTime == 0 && ft.dwHighDateTime == 0) {
+            outBuf[0] = L'\0';
+            return;
+        }
+        FILETIME localFt;
+        if (FileTimeToLocalFileTime(&ft, &localFt)) {
+            SYSTEMTIME st;
+            if (FileTimeToSystemTime(&localFt, &st)) {
+                if (withTime) {
+                    swprintf_s(outBuf, bufSize, L"%02d.%02d.%04d %02d:%02d", st.wDay, st.wMonth, st.wYear, st.wHour, st.wMinute);
+                } else {
+                    swprintf_s(outBuf, bufSize, L"%02d.%02d.%04d", st.wDay, st.wMonth, st.wYear);
+                }
+                return;
+            }
+        }
+        outBuf[0] = L'\0';
+    }
+
+    static std::wstring FormatNumberWithSpaces(size_t val) {
+        std::wstring s = std::to_wstring(val);
+        int n = (int)s.length() - 3;
+        while (n > 0) {
+            s.insert(n, L" ");
+            n -= 3;
+        }
+        return s;
     }
 
     static void EnsureConfigUnicode() {
@@ -167,8 +258,9 @@ public:
     }
 
     static std::wstring ToLower(std::wstring str) {
-        if (!str.empty()) {
-            CharLowerBuffW(&str[0], (DWORD)str.length());
+        FastChar::EnsureInit();
+        for (auto& c : str) {
+            c = FastChar::ToLower(c);
         }
         return str;
     }
@@ -218,8 +310,13 @@ public:
     }
 
     static bool IsAppPinned(const std::wstring& name, const std::vector<AppItem>& pinnedList) {
+        std::wstring lower = ToLower(name);
         for (const auto& item : pinnedList) {
-            if (_wcsicmp(item.name.c_str(), name.c_str()) == 0) return true;
+            if (_wcsicmp(item.name.c_str(), name.c_str()) == 0 ||
+                item.lowerName == lower ||
+                (!item.target.empty() && _wcsicmp(item.target.c_str(), name.c_str()) == 0)) {
+                return true;
+            }
         }
         return false;
     }
@@ -724,6 +821,9 @@ inline std::vector<AppItem> Config::LoadTabItems(const TabDefinition& tab) {
                     item.hIcon = AppIndexer::ExtractCleanIcon(item.target, true);
                     list.push_back(item);
                 }
+            } else if (item.target.rfind(L"shell:", 0) == 0 || item.target.rfind(L"ms-", 0) == 0) {
+                item.hIcon = AppIndexer::ExtractCleanIcon(item.target, false);
+                list.push_back(item);
             } else {
                 std::wstring resolved = ResolveAppPath(item.target);
                 if (GetFileAttributesW(resolved.c_str()) != INVALID_FILE_ATTRIBUTES) {

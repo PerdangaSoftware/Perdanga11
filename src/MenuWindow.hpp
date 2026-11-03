@@ -55,6 +55,7 @@ public:
 
                 SetTimer(hwnd, TIMER_UPDATE_RECT, 2500, nullptr);
                 SetTimer(hwnd, TIMER_INIT_TASKBAR_POLL, 200, nullptr);
+                SetTimer(hwnd, TIMER_NATIVE_START_WATCHDOG, 400, nullptr);
                 return 0;
             }
 
@@ -101,10 +102,14 @@ public:
                 }
 
                 if (g_maxScrollY > 0) {
-                    if (zDelta > 0) {
-                        g_scrollY -= CELL_HEIGHT;
+                    if (g_isSearchMode) {
+                        g_scrollY += (zDelta > 0 ? -(TABLE_ROW_HEIGHT * 3) : (TABLE_ROW_HEIGHT * 3));
                     } else {
-                        g_scrollY += CELL_HEIGHT;
+                        if (zDelta > 0) {
+                            g_scrollY -= CELL_HEIGHT;
+                        } else {
+                            g_scrollY += CELL_HEIGHT;
+                        }
                     }
                     g_scrollY = (std::max)(0, (std::min)(g_maxScrollY, g_scrollY));
                     InvalidateGridArea();
@@ -119,18 +124,25 @@ public:
 
             case WM_APP_SEARCH_COMPLETE: {
                 uint64_t gen = (uint64_t)wParam;
-                auto* pResults = (std::vector<AppItem>*)lParam;
-                if (pResults) {
+                auto* pPayload = (SearchPayload*)lParam;
+                if (pPayload) {
                     if (gen == g_searchGeneration.load()) {
-                        g_displayItems = std::move(*pResults);
-                        int totalRows = ((int)g_displayItems.size() + GRID_COLS - 1) / GRID_COLS;
-                        g_maxScrollY = (std::max)(0, (totalRows * CELL_HEIGHT) - VIEWPORT_HEIGHT);
+                        g_searchApps = std::move(pPayload->searchApps);
+                        g_searchResults = std::move(pPayload->results);
+                        if (g_isSearchMode) {
+                            int totalRows = (int)g_searchResults.size();
+                            g_maxScrollY = (std::max)(0, (totalRows * TABLE_ROW_HEIGHT) - TABLE_VIEWPORT_HEIGHT);
+                        } else {
+                            int totalRows = ((int)g_displayItems.size() + GRID_COLS - 1) / GRID_COLS;
+                            g_maxScrollY = (std::max)(0, (totalRows * CELL_HEIGHT) - VIEWPORT_HEIGHT);
+                        }
                         g_scrollY = (std::max)(0, (std::min)(g_maxScrollY, g_scrollY));
                         g_hoveredIndex = -1;
                         g_showTooltip = false;
                         InvalidateGridArea();
+                        SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
                     }
-                    delete pResults;
+                    delete pPayload;
                 }
                 return 0;
             }
@@ -164,11 +176,14 @@ public:
                     ExecuteAsyncSearch();
                 } else if (wParam == TIMER_HOVER_TOOLTIP) {
                     KillTimer(hwnd, TIMER_HOVER_TOOLTIP);
-                    if (g_hoveredIndex >= 0 && g_hoveredIndex < (int)g_displayItems.size() && !g_isDragging && !MenuInteraction::g_isPowerMenuOpen) {
+                    int maxIdx = g_isSearchMode ? (int)g_searchResults.size() : (int)g_displayItems.size();
+                    if (g_hoveredIndex >= 0 && g_hoveredIndex < maxIdx && !g_isDragging && !MenuInteraction::g_isPowerMenuOpen) {
                         g_showTooltip = true;
                         g_tooltipItemIndex = g_hoveredIndex;
                         InvalidateGridArea();
                     }
+                } else if (wParam == TIMER_NATIVE_START_WATCHDOG) {
+                    Hooks::NativeStartWatchdogTimer(hwnd, uMsg, wParam, 0);
                 } else if (wParam == TIMER_LAUNCH_FLASH) {
                     KillTimer(hwnd, TIMER_LAUNCH_FLASH);
                     g_justLaunchedIndex = -1;
@@ -242,6 +257,27 @@ public:
                     }
                 }
 
+                int scrollStartY = g_isSearchMode ? TABLE_ROW_START_Y : GRID_START_Y;
+                int scrollHeight = g_isSearchMode ? TABLE_VIEWPORT_HEIGHT : VIEWPORT_HEIGHT;
+                if (g_maxScrollY > 0 && pt.x >= (MENU_WIDTH - 24) && pt.x <= MENU_WIDTH && pt.y >= scrollStartY && pt.y <= (scrollStartY + scrollHeight)) {
+                    float thumbY = GetScrollThumbY();
+                    float thumbH = GetScrollThumbHeight();
+                    if ((float)pt.y < thumbY || (float)pt.y > (thumbY + thumbH)) {
+                        float trackAvail = (float)scrollHeight - thumbH;
+                        if (trackAvail > 0.0f) {
+                            float clickRatio = ((float)pt.y - (float)scrollStartY - thumbH * 0.5f) / trackAvail;
+                            int newScrollY = (int)(clickRatio * (float)g_maxScrollY + 0.5f);
+                            g_scrollY = (std::max)(0, (std::min)(g_maxScrollY, newScrollY));
+                        }
+                    }
+                    g_isScrollbarDragging = true;
+                    g_scrollDragStartY = pt.y;
+                    g_scrollDragStartScrollY = g_scrollY;
+                    SetCapture(hwnd);
+                    InvalidateGridArea();
+                    return 0;
+                }
+
                 if (MenuInteraction::g_isPowerMenuOpen) {
                     if (PtInRect(&g_powerFlyoutRect, pt)) {
                         int itemH = 38;
@@ -282,6 +318,21 @@ public:
                 int x = GET_X_LPARAM(lParam);
                 int y = GET_Y_LPARAM(lParam);
                 POINT pt = { x, y };
+
+                if (g_isScrollbarDragging) {
+                    int dy = y - g_scrollDragStartY;
+                    float trackAvail = GetScrollTrackHeight() - GetScrollThumbHeight();
+                    if (trackAvail > 0.0f) {
+                        int deltaScroll = (int)(((float)dy / trackAvail) * (float)g_maxScrollY);
+                        int newScroll = g_scrollDragStartScrollY + deltaScroll;
+                        newScroll = (std::max)(0, (std::min)(g_maxScrollY, newScroll));
+                        if (newScroll != g_scrollY) {
+                            g_scrollY = newScroll;
+                            InvalidateGridArea();
+                        }
+                    }
+                    return 0;
+                }
 
                 if (MenuInteraction::g_isPowerMenuOpen && PtInRect(&g_powerFlyoutRect, pt)) {
                     int itemH = 38;
@@ -366,14 +417,15 @@ public:
                 bool dwnHov = PtInRect(&g_downloadsButtonRect, pt);
                 if (dwnHov != g_downloadsHovered) { g_downloadsHovered = dwnHov; InvalidateRect(hwnd, &g_downloadsButtonRect, FALSE); }
 
-                int newHover = -1;
-                int relY = y - GRID_START_Y + g_scrollY;
-                if (x >= GRID_START_X && x < GRID_START_X + (GRID_COLS * CELL_WIDTH) && y >= GRID_START_Y && y <= GRID_START_Y + VIEWPORT_HEIGHT && relY >= 0) {
-                    int col = (x - GRID_START_X) / CELL_WIDTH;
-                    int row = relY / CELL_HEIGHT;
-                    int idx = row * GRID_COLS + col;
-                    if (idx >= 0 && idx < (int)g_displayItems.size()) newHover = idx;
+                int scrollStartY = g_isSearchMode ? TABLE_ROW_START_Y : GRID_START_Y;
+                int scrollHeight = g_isSearchMode ? TABLE_VIEWPORT_HEIGHT : VIEWPORT_HEIGHT;
+                bool isScrollHov = (g_maxScrollY > 0 && x >= (MENU_WIDTH - 24) && x <= MENU_WIDTH && y >= scrollStartY && y <= (scrollStartY + scrollHeight));
+                if (isScrollHov != g_isScrollbarHovered) {
+                    g_isScrollbarHovered = isScrollHov;
+                    InvalidateGridArea();
                 }
+
+                int newHover = isScrollHov ? -1 : GetItemIndexAtPoint(x, y);
 
                 if (newHover != g_hoveredIndex) {
                     g_hoveredIndex = newHover;
@@ -391,7 +443,7 @@ public:
             }
 
             case WM_MOUSELEAVE: {
-                if (!g_isDragging) {
+                if (!g_isDragging && !g_isScrollbarDragging) {
                     g_hoveredIndex = -1;
                     g_showTooltip = false;
                     KillTimer(hwnd, TIMER_HOVER_TOOLTIP);
@@ -404,6 +456,7 @@ public:
                     g_settingsHovered = false;
                     g_explorerHovered = false;
                     g_downloadsHovered = false;
+                    g_isScrollbarHovered = false;
                     InvalidateGridArea();
                 }
                 return 0;
@@ -412,24 +465,21 @@ public:
             case WM_MBUTTONUP: {
                 int x = GET_X_LPARAM(lParam);
                 int y = GET_Y_LPARAM(lParam);
-                int relY = y - GRID_START_Y + g_scrollY;
+                int idx = GetItemIndexAtPoint(x, y);
 
-                if (x >= GRID_START_X && x < GRID_START_X + (GRID_COLS * CELL_WIDTH) && y >= GRID_START_Y && y <= GRID_START_Y + VIEWPORT_HEIGHT && relY >= 0) {
-                    int col = (x - GRID_START_X) / CELL_WIDTH;
-                    int row = relY / CELL_HEIGHT;
-                    int idx = row * GRID_COLS + col;
-                    if (idx >= 0 && idx < (int)g_displayItems.size()) {
-                        MenuInteraction::ExecuteApp(g_displayItems[idx], false);
-                        g_suppressCloseOnDeactivate = true;
-                        g_justLaunchedIndex = idx;
-                        g_justLaunchedTime = GetTickCount();
-                        SetTimer(hwnd, TIMER_LAUNCH_FLASH, 500, nullptr);
-                        SetTimer(hwnd, TIMER_RESET_DEACTIVATE, 600, nullptr);
-                        SetWindowPos(g_hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-                        SetForegroundWindow(g_hWnd);
-                        SetFocus(g_hWnd);
-                        InvalidateGridArea();
-                    }
+                int maxIdx = g_isSearchMode ? (int)g_searchResults.size() : (int)g_displayItems.size();
+                if (idx >= 0 && idx < maxIdx) {
+                    AppItem targetApp = g_isSearchMode ? GetSearchRowAppItem(idx) : g_displayItems[idx];
+                    MenuInteraction::ExecuteApp(targetApp, false);
+                    g_suppressCloseOnDeactivate = true;
+                    g_justLaunchedIndex = idx;
+                    g_justLaunchedTime = GetTickCount();
+                    SetTimer(hwnd, TIMER_LAUNCH_FLASH, 500, nullptr);
+                    SetTimer(hwnd, TIMER_RESET_DEACTIVATE, 600, nullptr);
+                    SetWindowPos(g_hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                    SetForegroundWindow(g_hWnd);
+                    SetFocus(g_hWnd);
+                    InvalidateGridArea();
                 }
                 return 0;
             }
@@ -504,9 +554,10 @@ public:
 
                 auto& activeTab = Config::GetActiveTab();
 
-                if (g_hoveredIndex >= 0 && g_hoveredIndex < (int)g_displayItems.size()) {
+                int maxIdx = g_isSearchMode ? (int)g_searchResults.size() : (int)g_displayItems.size();
+                if (g_hoveredIndex >= 0 && g_hoveredIndex < maxIdx) {
                     g_contextItemIndex = g_hoveredIndex;
-                    const AppItem& targetItem = g_displayItems[g_contextItemIndex];
+                    AppItem targetItem = g_isSearchMode ? GetSearchRowAppItem(g_contextItemIndex) : g_displayItems[g_contextItemIndex];
 
                     int cmd = MenuInteraction::ShowItemContextMenu(hwnd, pt, targetItem, Config::g_activeTabIndex);
 
@@ -514,7 +565,8 @@ public:
                         if (Config::IsAppPinned(targetItem.name, activeTab.items)) {
                             Config::DeleteTabItem(activeTab, targetItem.name);
                         } else {
-                            Config::SaveTabItem(activeTab, targetItem.name, targetItem.target);
+                            std::wstring pinTarget = AppIndexer::ResolveItemRealTargetPath(targetItem);
+                            Config::SaveTabItem(activeTab, targetItem.name, pinTarget);
                         }
                         ReloadPinnedData();
                     } else if (cmd >= ID_PIN_TO_TAB_BASE && cmd < ID_PIN_TO_TAB_BASE + 50) {
@@ -524,7 +576,8 @@ public:
                             if (Config::IsAppPinned(targetItem.name, targetTab.items)) {
                                 Config::DeleteTabItem(targetTab, targetItem.name);
                             } else {
-                                Config::SaveTabItem(targetTab, targetItem.name, targetItem.target);
+                                std::wstring pinTarget = AppIndexer::ResolveItemRealTargetPath(targetItem);
+                                Config::SaveTabItem(targetTab, targetItem.name, pinTarget);
                             }
                             ReloadPinnedData();
                         }
@@ -533,6 +586,10 @@ public:
                         CloseImmediately();
                     } else if (cmd == ID_MENU_OPEN_LOCATION) {
                         MenuInteraction::OpenItemLocation(targetItem);
+                        CloseImmediately();
+                    } else if (cmd == ID_MENU_COPY_PATH) {
+                        std::wstring realPath = AppIndexer::ResolveItemRealTargetPath(targetItem);
+                        MenuInteraction::CopyToClipboard(hwnd, realPath);
                         CloseImmediately();
                     }
                 } else {
@@ -553,6 +610,15 @@ public:
                 int x = GET_X_LPARAM(lParam);
                 int y = GET_Y_LPARAM(lParam);
                 POINT pt = { x, y };
+
+                if (g_isScrollbarDragging) {
+                    g_isScrollbarDragging = false;
+                    ReleaseCapture();
+                    bool isScrollHov = (g_maxScrollY > 0 && pt.x >= (MENU_WIDTH - 24) && pt.x <= MENU_WIDTH && pt.y >= GRID_START_Y && pt.y <= (GRID_START_Y + VIEWPORT_HEIGHT));
+                    g_isScrollbarHovered = isScrollHov;
+                    InvalidateGridArea();
+                    return 0;
+                }
 
                 ReleaseCapture();
                 g_showTooltip = false;
@@ -682,11 +748,13 @@ public:
                     return 0;
                 }
 
-                if (g_hoveredIndex >= 0 && g_hoveredIndex < (int)g_displayItems.size()) {
+                int maxIdx = g_isSearchMode ? (int)g_searchResults.size() : (int)g_displayItems.size();
+                if (g_hoveredIndex >= 0 && g_hoveredIndex < maxIdx) {
                     g_justLaunchedTime = GetTickCount();
                     g_justLaunchedIndex = g_hoveredIndex;
                     Hooks::DismissNativeShellOverlays();
-                    MenuInteraction::ExecuteApp(g_displayItems[g_hoveredIndex], false);
+                    AppItem app = g_isSearchMode ? GetSearchRowAppItem(g_hoveredIndex) : g_displayItems[g_hoveredIndex];
+                    MenuInteraction::ExecuteApp(app, false);
                     if (isShiftHeld) {
                         g_suppressCloseOnDeactivate = true;
                         SetTimer(hwnd, TIMER_LAUNCH_FLASH, 500, nullptr);
@@ -725,40 +793,68 @@ public:
 
                 wchar_t searchContent[64] = { 0 };
                 GetWindowTextW(g_hSearchEdit, searchContent, 64);
-                MenuRenderer::DrawSearchBar(g, rc, searchContent[0] != L'\0', GetFocus() == g_hSearchEdit);
+                bool hasSearch = (searchContent[0] != L'\0');
+                MenuRenderer::DrawSearchBar(g, rc, hasSearch, GetFocus() == g_hSearchEdit);
 
-                RecalculateTabLayout();
+                if (hasSearch) {
+                    MenuRenderer::DrawSearchTableHeader(g, rc);
 
-                MenuRenderer::DrawSubHeader(g, rc, Config::g_tabs, Config::g_activeTabIndex,
-                                            g_tabScrollX, g_maxTabScrollX, g_hasTabOverflow,
-                                            g_tabClipLeft, g_tabClipRight,
-                                            g_scrollLeftRect, g_scrollLeftHovered,
-                                            g_scrollRightRect, g_scrollRightHovered,
-                                            g_addTabRect, g_addTabHovered,
-                                            g_toggleViewRect, g_currentMode == MODE_ALL_APPS, g_toggleViewHovered);
+                    if (g_searchResults.empty()) {
+                        MenuRenderer::DrawEmptyCard(g, rc);
+                    } else {
+                        MenuRenderer::DrawTableList(g, memDC, rc, (int)g_searchResults.size(),
+                                                   GetSearchRowDisplayInfo,
+                                                   TABLE_START_X, TABLE_ROW_START_Y, TABLE_ROW_HEIGHT,
+                                                   TABLE_VIEWPORT_HEIGHT, g_scrollY, g_hoveredIndex,
+                                                   g_justLaunchedIndex, g_justLaunchedTime);
 
-                if (g_displayItems.empty()) {
-                    MenuRenderer::DrawEmptyCard(g, rc);
-                } else {
-                    MenuRenderer::DrawGrid(g, memDC, rc, g_displayItems,
-                                           GRID_START_X, GRID_START_Y, GRID_COLS, CELL_WIDTH, CELL_HEIGHT,
-                                           VIEWPORT_HEIGHT, g_scrollY, g_hoveredIndex,
-                                           g_isDragging, g_dragItemIndex, g_dragTargetIndex,
-                                           g_justLaunchedIndex, g_justLaunchedTime);
+                        MenuRenderer::DrawScrollBar(g, rc, TABLE_ROW_START_Y, TABLE_VIEWPORT_HEIGHT, g_scrollY, g_maxScrollY, g_isScrollbarHovered, g_isScrollbarDragging);
 
-                    MenuRenderer::DrawScrollBar(g, rc, GRID_START_Y, VIEWPORT_HEIGHT, g_scrollY, g_maxScrollY);
-
-                    const auto& activeTab = Config::GetActiveTab();
-                    if (g_isDragging && g_dragItemIndex >= 0 && g_dragItemIndex < (int)activeTab.items.size()) {
-                        MenuRenderer::DrawFloatingDragItem(g, memDC, activeTab.items[g_dragItemIndex], g_dragCurrentPt, CELL_WIDTH, CELL_HEIGHT);
+                        if (g_showTooltip && g_tooltipItemIndex >= 0 && g_tooltipItemIndex < (int)g_searchResults.size() && !g_isDragging) {
+                            std::wstring name, path, sz, dt, tgt, fullDt;
+                            HICON ico = nullptr;
+                            bool isDir = false;
+                            if (GetSearchRowTooltipInfo(g_tooltipItemIndex, name, path, sz, dt, ico, isDir, tgt, &fullDt)) {
+                                int rTop = TABLE_ROW_START_Y + (g_tooltipItemIndex * TABLE_ROW_HEIGHT) - g_scrollY;
+                                std::wstring realTgt = AppIndexer::ResolveItemRealTargetPath(tgt);
+                                MenuRenderer::DrawSearchItemTooltip(g, name, realTgt, sz, fullDt.empty() ? dt : fullDt, isDir, rTop, TABLE_ROW_HEIGHT, rc.right);
+                            }
+                        }
                     }
+                } else {
+                    RecalculateTabLayout();
 
-                    if (g_showTooltip && g_tooltipItemIndex >= 0 && g_tooltipItemIndex < (int)g_displayItems.size() && !g_isDragging) {
-                        int col = g_tooltipItemIndex % GRID_COLS;
-                        int row = g_tooltipItemIndex / GRID_COLS;
-                        int tLeft = GRID_START_X + (col * CELL_WIDTH);
-                        int tTop = GRID_START_Y + (row * CELL_HEIGHT) - g_scrollY;
-                        MenuRenderer::DrawItemPathTooltip(g, g_displayItems[g_tooltipItemIndex], tLeft, tTop, CELL_WIDTH, CELL_HEIGHT, rc.right);
+                    MenuRenderer::DrawSubHeader(g, rc, Config::g_tabs, Config::g_activeTabIndex,
+                                                g_tabScrollX, g_maxTabScrollX, g_hasTabOverflow,
+                                                g_tabClipLeft, g_tabClipRight,
+                                                g_scrollLeftRect, g_scrollLeftHovered,
+                                                g_scrollRightRect, g_scrollRightHovered,
+                                                g_addTabRect, g_addTabHovered,
+                                                g_toggleViewRect, g_currentMode == MODE_ALL_APPS, g_toggleViewHovered);
+
+                    if (g_displayItems.empty()) {
+                        MenuRenderer::DrawEmptyCard(g, rc);
+                    } else {
+                        MenuRenderer::DrawGrid(g, memDC, rc, g_displayItems,
+                                               GRID_START_X, GRID_START_Y, GRID_COLS, CELL_WIDTH, CELL_HEIGHT,
+                                               VIEWPORT_HEIGHT, g_scrollY, g_hoveredIndex,
+                                               g_isDragging, g_dragItemIndex, g_dragTargetIndex,
+                                               g_justLaunchedIndex, g_justLaunchedTime);
+
+                        MenuRenderer::DrawScrollBar(g, rc, GRID_START_Y, VIEWPORT_HEIGHT, g_scrollY, g_maxScrollY, g_isScrollbarHovered, g_isScrollbarDragging);
+
+                        const auto& activeTab = Config::GetActiveTab();
+                        if (g_isDragging && g_dragItemIndex >= 0 && g_dragItemIndex < (int)activeTab.items.size()) {
+                            MenuRenderer::DrawFloatingDragItem(g, memDC, activeTab.items[g_dragItemIndex], g_dragCurrentPt, CELL_WIDTH, CELL_HEIGHT);
+                        }
+
+                        if (g_showTooltip && g_tooltipItemIndex >= 0 && g_tooltipItemIndex < (int)g_displayItems.size() && !g_isDragging) {
+                            int col = g_tooltipItemIndex % GRID_COLS;
+                            int row = g_tooltipItemIndex / GRID_COLS;
+                            int tLeft = GRID_START_X + (col * CELL_WIDTH);
+                            int tTop = GRID_START_Y + (row * CELL_HEIGHT) - g_scrollY;
+                            MenuRenderer::DrawItemPathTooltip(g, g_displayItems[g_tooltipItemIndex], tLeft, tTop, CELL_WIDTH, CELL_HEIGHT, rc.right, rc.bottom);
+                        }
                     }
                 }
 
@@ -768,11 +864,15 @@ public:
                 g_explorerButtonRect  = { rc.right - 150, footerY + 6, rc.right - 112, footerY + 44 };
                 g_downloadsButtonRect = { rc.right - 194, footerY + 6, rc.right - 156, footerY + 44 };
 
+                std::wstring hoveredPath = L"";
+                int searchCount = (int)g_searchResults.size();
+
                 MenuRenderer::DrawFooterBar(g, rc,
                                             g_powerButtonRect, g_powerHovered,
                                             g_settingsButtonRect, g_settingsHovered,
                                             g_explorerButtonRect, g_explorerHovered,
-                                            g_downloadsButtonRect, g_downloadsHovered);
+                                            g_downloadsButtonRect, g_downloadsHovered,
+                                            hasSearch, (hasSearch ? searchCount : (int)g_displayItems.size()), hoveredPath);
 
                 if (MenuInteraction::g_isPowerMenuOpen) {
                     g_powerFlyoutRect = { rc.right - 236, footerY - 168, rc.right - 24, footerY - 4 };
@@ -823,7 +923,7 @@ public:
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
             wc.lpszClassName,
             L"Perdanga11",
-            WS_POPUP,
+            WS_POPUP | WS_CLIPCHILDREN,
             0, 0, MENU_WIDTH, MENU_HEIGHT,
             nullptr, nullptr, hInstance, nullptr
         );
@@ -835,7 +935,8 @@ public:
 };
 
 inline void CALLBACK Hooks::WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG, LONG, DWORD, DWORD) {
-    if (event != EVENT_SYSTEM_FOREGROUND || !hwnd || hwnd == g_hTargetWnd) return;
+    if (!hwnd || hwnd == g_hTargetWnd) return;
+    if (event != EVENT_SYSTEM_FOREGROUND && event != EVENT_OBJECT_SHOW) return;
 
     if (IsNativeStartWindow(hwnd)) {
         ShowWindow(hwnd, SW_HIDE);
@@ -924,10 +1025,86 @@ inline BOOL CALLBACK Hooks::NativeStartWatchdogEnumProc(HWND hwnd, LPARAM) {
     return TRUE;
 }
 
+inline DWORD WINAPI Hooks::StartMenuWatcherThreadProc(LPVOID) {
+    HDESK hDefaultDesk = OpenDesktopW(L"Default", 0, FALSE, GENERIC_ALL);
+    if (hDefaultDesk) {
+        SetThreadDesktop(hDefaultDesk);
+        CloseDesktop(hDefaultDesk);
+    }
+
+    wchar_t localStatePath[MAX_PATH] = { 0 };
+    ExpandEnvironmentStringsW(L"%LocalAppData%\\Packages\\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\\LocalState", localStatePath, MAX_PATH);
+
+    HANDLE hChange = FindFirstChangeNotificationW(localStatePath, FALSE, FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE);
+    if (hChange == INVALID_HANDLE_VALUE) return 0;
+
+    while (g_startWatcherRunning) {
+        DWORD dwWait = WaitForSingleObject(hChange, 500);
+        if (!g_startWatcherRunning) break;
+
+        if (dwWait == WAIT_OBJECT_0) {
+            if (!g_lastSearchItemName.empty() && (GetTickCount() - g_lastSearchItemTick < 8000)) {
+                std::wstring target = g_lastSearchItemName;
+                g_lastSearchItemName.clear();
+                if (MenuState::PinAppByName(target)) {
+                    PostMessageW(g_hTargetWnd, WM_APP_INDEX_READY, 0, 0);
+                    PostMessageW(g_hTargetWnd, WM_PAINT, 0, 0);
+                }
+            }
+            FindNextChangeNotification(hChange);
+        }
+    }
+
+    FindCloseChangeNotification(hChange);
+    return 0;
+}
+
 inline LRESULT CALLBACK Hooks::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION) {
         MSLLHOOKSTRUCT* pMouse = (MSLLHOOKSTRUCT*)lParam;
         POINT pt = pMouse->pt;
+
+        if (wParam == WM_RBUTTONUP) {
+            HWND hUnder = WindowFromPoint(pt);
+            HWND hTop = hUnder ? GetAncestor(hUnder, GA_ROOT) : nullptr;
+            if (!hTop) hTop = hUnder;
+            if (hTop && (IsNativeSearchWindow(hTop) || IsNativeStartWindow(hTop) || (hUnder && (IsNativeSearchWindow(hUnder) || IsNativeStartWindow(hUnder))))) {
+                std::thread([hTop, pt]() {
+                    std::wstring target = GetSearchElementAtPoint(hTop, pt);
+                    std::wstring clean = CleanAppName(target);
+                    if (!clean.empty()) {
+                        g_lastSearchItemName = clean;
+                        g_lastSearchItemTick = GetTickCount();
+                    }
+                }).detach();
+            }
+        }
+
+        if (wParam == WM_LBUTTONDOWN) {
+            if (!g_lastSearchItemName.empty() && (GetTickCount() - g_lastSearchItemTick < 10000)) {
+                std::wstring target = g_lastSearchItemName;
+                g_lastSearchItemName.clear();
+                HWND hUnder = WindowFromPoint(pt);
+                if (hUnder) {
+                    HWND hTop = GetAncestor(hUnder, GA_ROOT);
+                    if (!hTop) hTop = hUnder;
+                    std::thread([hTop, pt, target]() {
+                        std::wstring action = GetSearchElementAtPoint(hTop, pt);
+                        if (IsPinToStartAction(action)) {
+                            if (MenuState::PinAppByName(target)) {
+                                PostMessageW(g_hTargetWnd, WM_APP_INDEX_READY, 0, 0);
+                                PostMessageW(g_hTargetWnd, WM_PAINT, 0, 0);
+                            }
+                        } else if (IsUnpinFromStartAction(action)) {
+                            if (MenuState::UnpinAppByName(target)) {
+                                PostMessageW(g_hTargetWnd, WM_APP_INDEX_READY, 0, 0);
+                                PostMessageW(g_hTargetWnd, WM_PAINT, 0, 0);
+                            }
+                        }
+                    }).detach();
+                }
+            }
+        }
 
         bool isOverSearch = false;
         if ((g_searchButtonRect.right - g_searchButtonRect.left) > 0 &&
@@ -985,14 +1162,17 @@ inline LRESULT CALLBACK Hooks::LowLevelMouseProc(int nCode, WPARAM wParam, LPARA
             }
 
             RECT hitArea = g_startButtonRect;
-            hitArea.left -= 4;
-            hitArea.top -= 4;
+            hitArea.left -= 6;
+            hitArea.top -= 6;
+            if (g_taskbarAlignment == 0 && g_taskbarEdge == ABE_BOTTOM) {
+                hitArea.left = (std::min)(hitArea.left, (LONG)0);
+            }
             if ((g_searchButtonRect.right - g_searchButtonRect.left) > 0 && g_searchButtonRect.left >= g_startButtonRect.left) {
                 hitArea.right = (std::min)(g_startButtonRect.right, g_searchButtonRect.left);
             } else {
-                hitArea.right = g_startButtonRect.right;
+                hitArea.right = g_startButtonRect.right + 6;
             }
-            hitArea.bottom += 4;
+            hitArea.bottom += 6;
 
             if (wParam == WM_LBUTTONDOWN || wParam == WM_NCLBUTTONDOWN) {
                 if (PtInRect(&hitArea, pt)) {

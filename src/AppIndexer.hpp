@@ -1,6 +1,7 @@
 #pragma once
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <winioctl.h>
 #include <ole2.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -129,6 +130,48 @@ public:
         return GetExtensionIcon(ext);
     }
 
+    static HICON GetShellItemIcon(const std::wstring& path) {
+        std::wstring norm = Config::ToLower(path);
+        {
+            std::lock_guard<std::mutex> lock(s_cacheMutex);
+            auto it = s_fileIconCache.find(norm);
+            if (it != s_fileIconCache.end() && it->second) {
+                return it->second;
+            }
+        }
+
+        IShellItem* pItem = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&pItem))) && pItem) {
+            IShellItemImageFactory* pFactory = nullptr;
+            if (SUCCEEDED(pItem->QueryInterface(IID_PPV_ARGS(&pFactory))) && pFactory) {
+                HBITMAP hBmp = nullptr;
+                SIZE sz = { 32, 32 };
+                if (SUCCEEDED(pFactory->GetImage(sz, SIIGBF_ICONONLY, &hBmp)) && hBmp) {
+                    BITMAP bm = {};
+                    GetObject(hBmp, sizeof(bm), &bm);
+                    HBITMAP hMono = CreateBitmap(bm.bmWidth, bm.bmHeight, 1, 1, nullptr);
+                    ICONINFO ii = {};
+                    ii.fIcon = TRUE;
+                    ii.hbmMask = hMono;
+                    ii.hbmColor = hBmp;
+                    HICON hIcon = CreateIconIndirect(&ii);
+                    DeleteObject(hMono);
+                    DeleteObject(hBmp);
+                    pFactory->Release();
+                    pItem->Release();
+                    if (hIcon) {
+                        std::lock_guard<std::mutex> lock(s_cacheMutex);
+                        s_fileIconCache[norm] = hIcon;
+                        return hIcon;
+                    }
+                }
+                pFactory->Release();
+            }
+            pItem->Release();
+        }
+        return GetDefaultFileIcon();
+    }
+
     static HICON GetShortcutIcon(const std::wstring& iconPath, int iconIndex) {
         std::wstring key = Config::ToLower(iconPath) + L"|" + std::to_wstring(iconIndex);
         {
@@ -154,11 +197,12 @@ public:
         return IconCache::GetDefaultFolderIcon();
     }
 
-    static std::wstring ResolveLnkTarget(const std::wstring& lnkPath, std::wstring& outIconPath, int& outIconIndex) {
+    static std::wstring ResolveLnkTarget(const std::wstring& lnkPath, std::wstring& outIconPath, int& outIconIndex, std::wstring* outArgs = nullptr) {
         IShellLinkW* psl = nullptr;
         std::wstring targetPath = lnkPath;
         outIconPath.clear();
         outIconIndex = 0;
+        if (outArgs) outArgs->clear();
 
         if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, (void**)&psl))) {
             IPersistFile* ppf = nullptr;
@@ -169,6 +213,20 @@ public:
                     if (SUCCEEDED(psl->GetPath(szTarget, MAX_PATH, &wfd, SLGP_UNCPRIORITY))) {
                         if (szTarget[0] != L'\0') targetPath = szTarget;
                     }
+                    if (targetPath == lnkPath || szTarget[0] == L'\0') {
+                        if (SUCCEEDED(psl->GetPath(szTarget, MAX_PATH, &wfd, SLGP_RAWPATH))) {
+                            if (szTarget[0] != L'\0') targetPath = szTarget;
+                        }
+                    }
+                    if (targetPath == lnkPath || szTarget[0] == L'\0') {
+                        PIDLIST_ABSOLUTE pidl = nullptr;
+                        if (SUCCEEDED(psl->GetIDList(&pidl)) && pidl) {
+                            if (SHGetPathFromIDListW(pidl, szTarget) && szTarget[0] != L'\0') {
+                                targetPath = szTarget;
+                            }
+                            CoTaskMemFree(pidl);
+                        }
+                    }
 
                     wchar_t szIcon[MAX_PATH] = { 0 };
                     int nIcon = 0;
@@ -178,12 +236,52 @@ public:
                             outIconIndex = nIcon;
                         }
                     }
+
+                    if (outArgs) {
+                        wchar_t szArgs[MAX_PATH] = { 0 };
+                        if (SUCCEEDED(psl->GetArguments(szArgs, MAX_PATH)) && szArgs[0] != L'\0') {
+                            *outArgs = szArgs;
+                        }
+                    }
                 }
                 ppf->Release();
             }
             psl->Release();
         }
         return targetPath;
+    }
+
+    static std::wstring ResolveItemRealTargetPath(const std::wstring& rawTarget) {
+        std::wstring path = rawTarget;
+        if (path.length() >= 2 && path.front() == L'"' && path.back() == L'"') {
+            path = path.substr(1, path.length() - 2);
+        }
+        if (path.rfind(L"shell:AppsFolder\\", 0) == 0) {
+            return path;
+        }
+        size_t dotPos = path.find_last_of(L'.');
+        if (dotPos != std::wstring::npos && _wcsicmp(path.c_str() + dotPos, L".lnk") == 0) {
+            std::wstring iconPath;
+            int iconIdx = 0;
+            std::wstring realTarget = ResolveLnkTarget(path, iconPath, iconIdx);
+            if (!realTarget.empty() && realTarget != path) {
+                path = realTarget;
+            }
+        }
+        wchar_t expanded[MAX_PATH];
+        if (ExpandEnvironmentStringsW(path.c_str(), expanded, MAX_PATH)) {
+            path = expanded;
+        }
+        std::wstring resolved = Config::ResolveAppPath(path);
+        if (!resolved.empty()) {
+            path = resolved;
+        }
+        return path;
+    }
+
+    static std::wstring ResolveItemRealTargetPath(const AppItem& item) {
+        if (item.isDirectory) return item.target;
+        return ResolveItemRealTargetPath(item.target);
     }
 
     static HICON ExtractCleanIcon(const std::wstring& path, bool isDir = false) {
@@ -217,7 +315,15 @@ public:
             if (hShortcutIcon) return hShortcutIcon;
         }
 
+        if (targetPath.rfind(L"shell:", 0) == 0) {
+            return IconCache::GetShellItemIcon(targetPath);
+        }
+
         if (ext == L".exe") {
+            if (targetPath.find(L'\\') == std::wstring::npos) {
+                std::wstring res = Config::ResolveAppPath(targetPath);
+                if (!res.empty()) targetPath = res;
+            }
             return IconCache::GetCachedFileIcon(targetPath);
         }
 
@@ -268,7 +374,8 @@ public:
         if (lowerPath.find(L"\\administrative tools") != std::wstring::npos ||
             lowerPath.find(L"\\windows tools") != std::wstring::npos ||
             lowerPath.find(L"\\system tools") != std::wstring::npos ||
-            lowerPath.find(L"\\accessibility") != std::wstring::npos) {
+            lowerPath.find(L"\\accessibility") != std::wstring::npos ||
+            lowerPath.find(L"\\windows kits") != std::wstring::npos) {
             return true;
         }
 
@@ -309,6 +416,14 @@ public:
 
         if (lowerName == L"git cmd" || lowerName == L"git gui") return true;
         if (lowerName == L"dfrgui" || lowerName == L"services") return true;
+        if (lowerName.find(L"software development kit") != std::wstring::npos ||
+            lowerName.find(L"windows kits") != std::wstring::npos) return true;
+        if (lowerTarget.find(L"explorer.exe") != std::wstring::npos) {
+            if (lowerName != L"\x043F\x0440\x043E\x0432\x043E\x0434\x043D\x0438\x043A" &&
+                lowerName != L"file explorer" && lowerName != L"explorer") {
+                return true;
+            }
+        }
 
         size_t slashPos = lowerTarget.find_last_of(L"\\/");
         size_t dotPos = lowerTarget.find_last_of(L'.');
@@ -337,14 +452,15 @@ public:
                     size_t dotPos = fileName.find_last_of(L'.');
                     if (dotPos != std::wstring::npos) {
                         std::wstring ext = fileName.substr(dotPos);
-                        for (auto& c : ext) c = towlower(c);
+                        for (auto& c : ext) c = FastChar::ToLower(c);
 
                         if (ext == L".lnk") {
                             std::wstring appName = fileName.substr(0, dotPos);
 
                             std::wstring iconPath;
                             int iconIdx = 0;
-                            std::wstring resolvedTarget = ResolveLnkTarget(fullPath, iconPath, iconIdx);
+                            std::wstring args;
+                            std::wstring resolvedTarget = ResolveLnkTarget(fullPath, iconPath, iconIdx, &args);
                             resolvedTarget = Config::ResolveAppPath(resolvedTarget);
 
                             if (IsJunkOrSecondaryShortcut(appName, fullPath, resolvedTarget)) continue;
@@ -362,9 +478,11 @@ public:
 
                             AppItem item;
                             item.name = appName;
-                            item.target = fullPath;
+                            bool hasRealExe = (!resolvedTarget.empty() && args.empty() && GetFileAttributesW(resolvedTarget.c_str()) != INVALID_FILE_ATTRIBUTES);
+                            item.target = hasRealExe ? resolvedTarget : fullPath;
+                            item.arguments = args;
                             item.lowerName = normName;
-                            item.lowerExt = L".lnk";
+                            item.lowerExt = hasRealExe ? L".exe" : L".lnk";
                             item.lowerTarget = normTarget;
                             item.isDirectory = false;
                             item.hIcon = ExtractCleanIcon(fullPath, false);
@@ -444,148 +562,250 @@ public:
         return folders;
     }
 
-    static bool IsSupportedUserFileExtension(const std::wstring& lowerExt) {
-        static const std::unordered_set<std::wstring> allowedExtensions = {
-            L".txt", L".png", L".jpg", L".jpeg", L".bmp", L".gif", L".webp",
-            L".pdf", L".doc", L".docx", L".xls", L".xlsx", L".ppt", L".pptx",
-            L".rtf", L".csv", L".md", L".log", L".json", L".xml", L".ini",
-            L".zip", L".rar", L".7z", L".tar", L".gz",
-            L".mp3", L".wav", L".flac", L".mp4", L".mkv", L".avi",
-            L".cpp", L".h", L".hpp", L".cs", L".py", L".js", L".ts", L".html", L".css"
-        };
-        return allowedExtensions.count(lowerExt) > 0;
-    }
-
     static bool ShouldSkipDirectory(const wchar_t* dirName) {
         if (!dirName || dirName[0] == L'\0') return true;
-        if (dirName[0] == L'$' || dirName[0] == L'.') return true;
-
-        static const wchar_t* skipList[] = {
-            L"System Volume Information", L"Windows", L"Program Files", L"Program Files (x86)",
-            L"ProgramData", L"AppData", L"node_modules", L"Recovery", L"MSOCache",
-            L"Config.Msi", L"WindowsApps", L"WpSystem", L"steamapps", L"vendor",
-            L"bin", L"obj", L".git", L".svn", L".vs"
-        };
-        for (const wchar_t* skip : skipList) {
-            if (_wcsicmp(dirName, skip) == 0) return true;
-        }
+        if (_wcsicmp(dirName, L"System Volume Information") == 0) return true;
+        if (_wcsicmp(dirName, L"WinSxS") == 0) return true;
         return false;
     }
 
-    static void ScanDirectoryForItems(const std::wstring& directory, int maxDepth, int currentDepth,
-                                      std::vector<AppItem>& outItems, std::unordered_set<std::wstring>& seen) {
-        if (currentDepth > maxDepth || outItems.size() > 40000) return;
+    static bool ShouldSkipFile(const wchar_t* fName) {
+        if (!fName || fName[0] == L'\0') return true;
+        if (fName[0] == L'.' && (fName[1] == L'\0' || (fName[1] == L'.' && fName[2] == L'\0'))) return true;
+        return false;
+    }
+
+    static void ScanDirectoryFast(const std::wstring& directory, int maxDepth, int currentDepth,
+                                  std::vector<std::wstring>& dirPool,
+                                  std::vector<CompactFileItem>& outItems) {
+        if (currentDepth > maxDepth) return;
 
         std::wstring pattern = directory;
         if (pattern.back() != L'\\') pattern += L'\\';
         pattern += L'*';
 
         WIN32_FIND_DATAW fd;
-        HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
+        HANDLE hFind = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
         if (hFind == INVALID_HANDLE_VALUE) return;
 
+        uint32_t dirId = (uint32_t)dirPool.size();
+        dirPool.push_back(directory);
+
+        std::vector<std::wstring> subdirs;
+        subdirs.reserve(16);
+
         do {
-            if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
-            if (fd.cFileName[0] == L'$') continue;
-
-            std::wstring fullPath = directory;
-            if (fullPath.back() != L'\\') fullPath += L'\\';
-            fullPath += fd.cFileName;
-
-            std::wstring norm = Config::ToLower(fullPath);
+            if (fd.cFileName[0] == L'.' && (fd.cFileName[1] == L'\0' || (fd.cFileName[1] == L'.' && fd.cFileName[2] == L'\0'))) {
+                continue;
+            }
 
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+                    continue;
+                }
                 if (ShouldSkipDirectory(fd.cFileName)) continue;
 
-                if (seen.count(norm) == 0) {
-                    seen.insert(norm);
-                    AppItem folderItem;
-                    folderItem.name = fd.cFileName;
-                    folderItem.target = fullPath;
-                    folderItem.lowerName = Config::ToLower(fd.cFileName);
-                    folderItem.lowerExt = L"";
-                    folderItem.lowerTarget = norm;
-                    folderItem.isDirectory = true;
-                    folderItem.hIcon = IconCache::GetDefaultFolderIcon();
-                    outItems.push_back(folderItem);
-                }
+                CompactFileItem folderItem;
+                folderItem.dirId = dirId;
+                folderItem.name = fd.cFileName;
+                folderItem.fileSize = 0;
+                folderItem.lastWriteTime = fd.ftLastWriteTime;
+                folderItem.isDirectory = true;
+                outItems.push_back(std::move(folderItem));
 
-                ScanDirectoryForItems(fullPath, maxDepth, currentDepth + 1, outItems, seen);
+                std::wstring fullPath = directory;
+                if (fullPath.back() != L'\\') fullPath += L'\\';
+                fullPath += fd.cFileName;
+                subdirs.push_back(std::move(fullPath));
             } else {
-                std::wstring fName = fd.cFileName;
-                if (_wcsicmp(fName.c_str(), L"desktop.ini") == 0) continue;
+                if (ShouldSkipFile(fd.cFileName)) continue;
 
-                size_t dotPos = fName.find_last_of(L'.');
-                if (dotPos == std::wstring::npos) continue;
-
-                std::wstring ext = Config::ToLower(fName.substr(dotPos));
-                if (!IsSupportedUserFileExtension(ext)) continue;
-
-                if (seen.count(norm) == 0) {
-                    seen.insert(norm);
-                    AppItem item;
-                    item.name = fName;
-                    item.target = fullPath;
-                    item.lowerName = Config::ToLower(fName);
-                    item.lowerExt = ext;
-                    item.lowerTarget = norm;
-                    item.isDirectory = false;
-                    item.hIcon = IconCache::GetExtensionIcon(ext);
-                    outItems.push_back(item);
-                }
+                CompactFileItem item;
+                item.dirId = dirId;
+                item.name = fd.cFileName;
+                ULARGE_INTEGER ul;
+                ul.LowPart = fd.nFileSizeLow;
+                ul.HighPart = fd.nFileSizeHigh;
+                item.fileSize = ul.QuadPart;
+                item.lastWriteTime = fd.ftLastWriteTime;
+                item.isDirectory = false;
+                outItems.push_back(std::move(item));
             }
         } while (FindNextFileW(hFind, &fd));
 
         FindClose(hFind);
+
+        for (const auto& sub : subdirs) {
+            ScanDirectoryFast(sub, maxDepth, currentDepth + 1, dirPool, outItems);
+        }
     }
 
-    static std::vector<AppItem> ScanUserFilesAndFolders() {
-        std::vector<AppItem> items;
-        std::unordered_set<std::wstring> seen;
+    static void ScanDriveRoot(const std::wstring& rootDir,
+                              std::vector<std::wstring>& dirPool,
+                              std::vector<CompactFileItem>& items) {
+        std::wstring pattern = rootDir;
+        if (pattern.back() != L'\\') pattern += L'\\';
+        pattern += L'*';
 
-        const struct TargetLoc {
-            KNOWNFOLDERID fid;
-            int maxDepth;
-        } locations[] = {
-            { FOLDERID_Desktop,       3 },
-            { FOLDERID_PublicDesktop, 2 },
-            { FOLDERID_Documents,     2 },
-            { FOLDERID_Downloads,     1 },
-            { FOLDERID_Pictures,      2 }
-        };
+        WIN32_FIND_DATAW fd;
+        HANDLE hFind = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+        if (hFind == INVALID_HANDLE_VALUE) return;
 
-        for (const auto& loc : locations) {
-            PWSTR pPath = nullptr;
-            if (SUCCEEDED(SHGetKnownFolderPath(loc.fid, 0, nullptr, &pPath)) && pPath) {
-                ScanDirectoryForItems(pPath, loc.maxDepth, 0, items, seen);
-                CoTaskMemFree(pPath);
+        uint32_t dirId = (uint32_t)dirPool.size();
+        dirPool.push_back(rootDir);
+
+        std::vector<std::wstring> subdirs;
+        subdirs.reserve(32);
+
+        do {
+            if (fd.cFileName[0] == L'.' && (fd.cFileName[1] == L'\0' || (fd.cFileName[1] == L'.' && fd.cFileName[2] == L'\0'))) {
+                continue;
             }
-        }
 
-        wchar_t sysDriveLetter = L'C';
-        wchar_t winDir[MAX_PATH] = { 0 };
-        if (GetWindowsDirectoryW(winDir, MAX_PATH) > 0) {
-            sysDriveLetter = (wchar_t)towupper(winDir[0]);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+                    continue;
+                }
+                if (ShouldSkipDirectory(fd.cFileName)) continue;
+
+                CompactFileItem folderItem;
+                folderItem.dirId = dirId;
+                folderItem.name = fd.cFileName;
+                folderItem.fileSize = 0;
+                folderItem.lastWriteTime = fd.ftLastWriteTime;
+                folderItem.isDirectory = true;
+                items.push_back(std::move(folderItem));
+
+                std::wstring fullPath = rootDir;
+                if (fullPath.back() != L'\\') fullPath += L'\\';
+                fullPath += fd.cFileName;
+                subdirs.push_back(std::move(fullPath));
+            } else {
+                if (ShouldSkipFile(fd.cFileName)) continue;
+
+                CompactFileItem item;
+                item.dirId = dirId;
+                item.name = fd.cFileName;
+                ULARGE_INTEGER ul;
+                ul.LowPart = fd.nFileSizeLow;
+                ul.HighPart = fd.nFileSizeHigh;
+                item.fileSize = ul.QuadPart;
+                item.lastWriteTime = fd.ftLastWriteTime;
+                item.isDirectory = false;
+                items.push_back(std::move(item));
+            }
+        } while (FindNextFileW(hFind, &fd));
+
+        FindClose(hFind);
+
+        for (const auto& sub : subdirs) {
+            ScanDirectoryFast(sub, 32, 1, dirPool, items);
         }
+    }
+
+    static void ScanAllDrivesAndUserFiles(std::vector<std::wstring>& dirPool,
+                                          std::vector<CompactFileItem>& items) {
+        items.reserve(262144);
+        dirPool.reserve(32768);
 
         DWORD drives = GetLogicalDrives();
         for (int i = 0; i < 26; ++i) {
             if (drives & (1 << i)) {
-                wchar_t driveLetterChar = (wchar_t)(L'A' + i);
-                wchar_t driveRoot[] = { driveLetterChar, L':', L'\\', L'\0' };
-
+                wchar_t driveLetter = (wchar_t)(L'A' + i);
+                wchar_t driveRoot[] = { driveLetter, L':', L'\\', L'\0' };
                 UINT type = GetDriveTypeW(driveRoot);
                 if (type == DRIVE_FIXED || type == DRIVE_REMOVABLE) {
-                    if (towupper(driveLetterChar) == sysDriveLetter) {
-                        ScanDirectoryForItems(driveRoot, 2, 0, items, seen);
-                    } else {
-                        ScanDirectoryForItems(driveRoot, 3, 0, items, seen);
-                    }
+                    std::wstring rootStr = std::wstring(1, driveLetter) + L":";
+                    ScanDriveRoot(rootStr, dirPool, items);
                 }
             }
         }
 
-        return items;
+        items.shrink_to_fit();
+        dirPool.shrink_to_fit();
+    }
+
+    static bool IsAllowedAppsFolderApp(const std::wstring& name, const std::wstring& parseName) {
+        std::wstring lowerName = Config::ToLower(name);
+        std::wstring lowerParse = Config::ToLower(parseName);
+
+        if (lowerParse.find(L"microsoft.windowsstore") != std::wstring::npos ||
+            lowerName == L"microsoft store" || lowerName == L"store" ||
+            lowerName == L"\x043C\x0430\x0433\x0430\x0437\x0438\x043D microsoft") {
+            return true;
+        }
+
+        if (lowerParse.find(L"nvidiacontrolpanel") != std::wstring::npos ||
+            lowerName.find(L"nvidia control panel") != std::wstring::npos ||
+            lowerName.find(L"\x043F\x0430\x043D\x0435\x043B\x044C \x0443\x043F\x0440\x0430\x0432\x043B\x0435\x043D\x0438\x044F nvidia") != std::wstring::npos) {
+            return true;
+        }
+
+        if (lowerParse.find(L"bingweather") != std::wstring::npos ||
+            lowerName == L"\x043F\x043E\x0433\x043E\x0434\x0430" || lowerName == L"weather" ||
+            lowerName == L"msn weather" || lowerName == L"msn \x043F\x043E\x0433\x043E\x0434\x0430") {
+            return true;
+        }
+
+        if (lowerParse.find(L"screensketch") != std::wstring::npos ||
+            lowerParse.find(L"snippingtool") != std::wstring::npos ||
+            lowerName == L"\x043D\x043E\x0436\x043D\x0438\x0446\x044B" || lowerName == L"snipping tool") {
+            return true;
+        }
+
+        return false;
+    }
+
+    static void ScanAppsFolder(std::vector<AppItem>& outList,
+                               std::unordered_set<std::wstring>& seenNames,
+                               std::unordered_set<std::wstring>& seenTargets) {
+        IShellItem* pAppsFolder = nullptr;
+        if (FAILED(SHGetKnownFolderItem(FOLDERID_AppsFolder, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&pAppsFolder))) || !pAppsFolder) {
+            return;
+        }
+
+        IEnumShellItems* pEnum = nullptr;
+        if (FAILED(pAppsFolder->BindToHandler(nullptr, BHID_EnumItems, IID_PPV_ARGS(&pEnum))) || !pEnum) {
+            pAppsFolder->Release();
+            return;
+        }
+
+        IShellItem* pItem = nullptr;
+        while (pEnum->Next(1, &pItem, nullptr) == S_OK && pItem) {
+            LPWSTR name = nullptr;
+            if (SUCCEEDED(pItem->GetDisplayName(SIGDN_NORMALDISPLAY, &name)) && name) {
+                std::wstring sName = CleanAppName(name);
+                std::wstring lowerName = Config::ToLower(sName);
+                if (!sName.empty() && !seenNames.count(lowerName)) {
+                    LPWSTR parseName = nullptr;
+                    if (SUCCEEDED(pItem->GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING, &parseName)) && parseName) {
+                        if (IsAllowedAppsFolderApp(sName, parseName)) {
+                            std::wstring target = L"shell:AppsFolder\\" + std::wstring(parseName);
+                            std::wstring lowerTarget = Config::ToLower(target);
+                            if (!seenTargets.count(lowerTarget)) {
+                                AppItem app;
+                                app.name = sName;
+                                app.lowerName = lowerName;
+                                app.target = target;
+                                app.lowerTarget = lowerTarget;
+                                app.isDirectory = false;
+                                app.hIcon = ExtractCleanIcon(target);
+
+                                seenNames.insert(lowerName);
+                                seenTargets.insert(lowerTarget);
+                                outList.push_back(std::move(app));
+                            }
+                        }
+                        CoTaskMemFree(parseName);
+                    }
+                }
+                CoTaskMemFree(name);
+            }
+            pItem->Release();
+        }
+
+        pEnum->Release();
+        pAppsFolder->Release();
     }
 
     static void StartAsyncIndexing(HWND notifyWnd) {
@@ -620,23 +840,38 @@ public:
                 CoTaskMemFree(pubDesktopPath);
             }
 
+            ScanAppsFolder(apps, seenNames, seenTargets);
+
             std::sort(apps.begin(), apps.end(), [](const AppItem& a, const AppItem& b) {
                 return _wcsicmp(a.name.c_str(), b.name.c_str()) < 0;
             });
 
             std::vector<AppItem> frequentFolders = ScanFrequentFolders();
-            std::vector<AppItem> userItems = ScanUserFilesAndFolders();
 
-            auto snapshot = std::make_shared<IndexSnapshot>();
-            snapshot->installedApps = std::move(apps);
-            snapshot->frequentFolders = std::move(frequentFolders);
-            snapshot->userFiles = std::move(userItems);
+            auto initialSnapshot = std::make_shared<IndexSnapshot>();
+            initialSnapshot->installedApps = apps;
+            initialSnapshot->frequentFolders = frequentFolders;
+            {
+                std::lock_guard<std::mutex> lock(Config::g_indexMutex);
+                Config::g_indexSnapshot = initialSnapshot;
+                Config::g_isIndexingComplete = false;
+            }
+            if (notifyWnd) {
+                PostMessageW(notifyWnd, WM_APP_INDEX_READY, 0, 0);
+            }
+
+            auto fullSnapshot = std::make_shared<IndexSnapshot>();
+            fullSnapshot->installedApps = std::move(apps);
+            fullSnapshot->frequentFolders = std::move(frequentFolders);
+            ScanAllDrivesAndUserFiles(fullSnapshot->dirPool, fullSnapshot->userFiles);
 
             {
                 std::lock_guard<std::mutex> lock(Config::g_indexMutex);
-                Config::g_indexSnapshot = std::move(snapshot);
+                Config::g_indexSnapshot = std::move(fullSnapshot);
                 Config::g_isIndexingComplete = true;
             }
+
+            SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
 
             if (notifyWnd) {
                 PostMessageW(notifyWnd, WM_APP_INDEX_READY, 0, 0);
@@ -658,7 +893,7 @@ public:
 
         std::wstring result = input;
         for (auto& c : result) {
-            wchar_t low = towlower(c);
+            wchar_t low = FastChar::ToLower(c);
             auto it = ruToEn.find(low);
             if (it != ruToEn.end()) {
                 c = it->second;
@@ -756,6 +991,106 @@ public:
             std::wstring_view prefix(item.lowerName.c_str(), (std::min)(item.lowerName.length(), lowerQuery.length()));
             int dist = LevenshteinDistance(prefix, lowerQuery);
             if (dist <= 2) return 55 - (dist * 10);
+        }
+
+        return 0;
+    }
+
+    static inline size_t FindCaseInsensitive(const std::wstring& haystack, const std::wstring& lowerNeedle) {
+        if (lowerNeedle.empty()) return 0;
+        if (haystack.length() < lowerNeedle.length()) return std::wstring::npos;
+
+        size_t nLen = lowerNeedle.length();
+        size_t hLen = haystack.length();
+        wchar_t first = lowerNeedle[0];
+
+        for (size_t i = 0; i <= hLen - nLen; ++i) {
+            if (FastChar::ToLower(haystack[i]) == first) {
+                bool match = true;
+                for (size_t j = 1; j < nLen; ++j) {
+                    if (FastChar::ToLower(haystack[i + j]) != lowerNeedle[j]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) return i;
+            }
+        }
+        return std::wstring::npos;
+    }
+
+    static int CalculateCompactScoreFast(const CompactFileItem& item,
+                                         const std::wstring& lowerQuery,
+                                         const std::wstring& convertedQuery,
+                                         const std::vector<std::wstring>& tokens,
+                                         const std::vector<std::wstring>& convertedTokens) {
+        if (lowerQuery.empty()) return 100;
+
+        const std::wstring& name = item.name;
+        size_t nLen = name.length();
+        size_t qLen = lowerQuery.length();
+
+        if (nLen == qLen) {
+            bool exact = true;
+            for (size_t i = 0; i < nLen; ++i) {
+                if (FastChar::ToLower(name[i]) != lowerQuery[i]) {
+                    exact = false;
+                    break;
+                }
+            }
+            if (exact) return 100;
+        }
+
+        size_t namePos = FindCaseInsensitive(name, lowerQuery);
+        if (namePos == 0) return 96;
+        if (namePos != std::wstring::npos) {
+            return 92 - (int)(std::min)((size_t)15, namePos);
+        }
+
+        if (!convertedQuery.empty() && convertedQuery != lowerQuery) {
+            if (nLen == convertedQuery.length()) {
+                bool exact = true;
+                for (size_t i = 0; i < nLen; ++i) {
+                    if (FastChar::ToLower(name[i]) != convertedQuery[i]) {
+                        exact = false;
+                        break;
+                    }
+                }
+                if (exact) return 98;
+            }
+            size_t cpos = FindCaseInsensitive(name, convertedQuery);
+            if (cpos == 0) return 94;
+            if (cpos != std::wstring::npos) return 88 - (int)(std::min)((size_t)15, cpos);
+        }
+
+        if (tokens.size() > 1) {
+            bool allFound = true;
+            for (size_t t = 0; t < tokens.size(); ++t) {
+                if (FindCaseInsensitive(name, tokens[t]) == std::wstring::npos) {
+                    if (convertedTokens[t].empty() || FindCaseInsensitive(name, convertedTokens[t]) == std::wstring::npos) {
+                        allFound = false;
+                        break;
+                    }
+                }
+            }
+            if (allFound) return 90;
+        }
+
+        if (!item.isDirectory) {
+            size_t dotPos = name.find_last_of(L'.');
+            if (dotPos != std::wstring::npos) {
+                size_t extLen = nLen - (dotPos + 1);
+                if (extLen == qLen) {
+                    bool matchExt = true;
+                    for (size_t i = 0; i < qLen; ++i) {
+                        if (FastChar::ToLower(name[dotPos + 1 + i]) != lowerQuery[i]) {
+                            matchExt = false;
+                            break;
+                        }
+                    }
+                    if (matchExt) return 80;
+                }
+            }
         }
 
         return 0;

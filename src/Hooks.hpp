@@ -16,6 +16,12 @@ public:
     static inline HHOOK g_hKeyboardHook = nullptr;
     static inline HHOOK g_hMouseHook = nullptr;
     static inline HWINEVENTHOOK g_hWinEventHook = nullptr;
+    static inline HWINEVENTHOOK g_hWinEventShowHook = nullptr;
+    static inline std::wstring g_lastSearchItemName = L"";
+    static inline DWORD g_lastSearchItemTick = 0;
+    static inline IUIAutomation* g_pUIAutomation = nullptr;
+    static inline HANDLE g_hStartWatcherThread = nullptr;
+    static inline bool g_startWatcherRunning = false;
     static inline HWND g_hTargetWnd = nullptr;
     static inline RECT g_startButtonRect = { 0, 0, 0, 0 };
     static inline RECT g_searchButtonRect = { 0, 0, 0, 0 };
@@ -114,8 +120,6 @@ public:
     static BOOL CALLBACK HideShellOverlayEnumProc(HWND hwnd, LPARAM) {
         if (!IsWindowVisible(hwnd)) return TRUE;
 
-        // ONLY target native Start menu (StartMenuExperienceHost.exe).
-        // NEVER hide or relocate SearchHost.exe! Doing so destroys the Windows 11 taskbar search UI island.
         if (IsNativeStartWindow(hwnd)) {
             ShowWindow(hwnd, SW_HIDE);
             SetWindowPos(hwnd, nullptr, -32000, -32000, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER);
@@ -132,8 +136,6 @@ public:
                 keybd_event(VK_ESCAPE, 0, 0, 0);
                 keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0);
             } else if (IsNativeSearchWindow(hFore)) {
-                // For native Windows Search flyout, only dismiss via Escape.
-                // Never hide or move its window offscreen.
                 keybd_event(VK_ESCAPE, 0, 0, 0);
                 keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0);
             }
@@ -258,7 +260,6 @@ public:
                     pCond->Release();
                 }
 
-                // Resolve SearchButton / SearchTextBox
                 VARIANT vSearchBtn, vSearchBox;
                 vSearchBtn.vt = VT_BSTR;
                 vSearchBtn.bstrVal = SysAllocString(L"SearchButton");
@@ -386,9 +387,170 @@ public:
     static void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG, LONG, DWORD, DWORD);
     static void CALLBACK NativeStartWatchdogTimer(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime);
     static BOOL CALLBACK NativeStartWatchdogEnumProc(HWND hwnd, LPARAM lParam);
+    static DWORD WINAPI StartMenuWatcherThreadProc(LPVOID);
+
+    static std::wstring CleanAppName(std::wstring name) {
+        size_t dash = name.find(L" - ");
+        if (dash != std::wstring::npos) name = name.substr(0, dash);
+        size_t nl = name.find_first_of(L"\r\n\t");
+        if (nl != std::wstring::npos) name = name.substr(0, nl);
+
+        if (name.find(L',') != std::wstring::npos) {
+            std::vector<std::wstring> parts;
+            size_t start = 0;
+            while (start < name.size()) {
+                size_t c = name.find(L',', start);
+                if (c == std::wstring::npos) c = name.size();
+                std::wstring p = name.substr(start, c - start);
+                while (!p.empty() && p.front() == L' ') p.erase(p.begin());
+                while (!p.empty() && p.back() == L' ') p.pop_back();
+                if (!p.empty()) parts.push_back(p);
+                start = c + 1;
+            }
+            std::wstring candidate = L"";
+            for (const auto& p : parts) {
+                std::wstring lp = Config::ToLower(p);
+                if (lp == L"\x043F\x0440\x0438\x043B\x043E\x0436\x0435\x043D\x0438\x0435" || lp == L"application" || lp == L"app" ||
+                    lp == L"\x0441\x0438\x0441\x0442\x0435\x043C\x043D\x044B\x0435" || lp == L"system" ||
+                    lp.find(L"\x0433\x0440\x0443\x043F\x043F\x0430") != std::wstring::npos || lp.find(L"group") != std::wstring::npos ||
+                    lp.find(L"\x0440\x0435\x043A\x043E\x043C\x0435\x043D\x0434\x0430\x0446\x0438\x0438") != std::wstring::npos || lp.find(L"recommendations") != std::wstring::npos) {
+                    continue;
+                }
+                candidate = p;
+                break;
+            }
+            if (!candidate.empty()) name = candidate;
+            else if (!parts.empty()) name = parts[0];
+        }
+
+        while (!name.empty() && name.back() == L' ') name.pop_back();
+        while (!name.empty() && name.front() == L' ') name.erase(name.begin());
+        return name;
+    }
+
+    static bool IsPinToStartAction(const std::wstring& name) {
+        std::wstring lower = Config::ToLower(name);
+        for (auto& ch : lower) {
+            if (ch == L'&' || ch == 0x00A0) ch = L' ';
+        }
+        if (lower.find(L"\x0437\x0430\x043A\x0440\x0435\x043F\x0438\x0442\x044C") != std::wstring::npos && 
+           (lower.find(L"\x044D\x043A\x0440\x0430\x043D") != std::wstring::npos || lower.find(L"\x043D\x0430\x0447\x0430\x043B\x044C\x043D") != std::wstring::npos)) {
+            return true;
+        }
+        if (lower.find(L"pin") != std::wstring::npos && lower.find(L"start") != std::wstring::npos && lower.find(L"unpin") == std::wstring::npos) {
+            return true;
+        }
+        return false;
+    }
+
+    static bool IsUnpinFromStartAction(const std::wstring& name) {
+        std::wstring lower = Config::ToLower(name);
+        for (auto& ch : lower) {
+            if (ch == L'&' || ch == 0x00A0) ch = L' ';
+        }
+        if (lower.find(L"\x043E\x0442\x043A\x0440\x0435\x043F\x0438\x0442\x044C") != std::wstring::npos && 
+           (lower.find(L"\x044D\x043A\x0440\x0430\x043D") != std::wstring::npos || lower.find(L"\x043D\x0430\x0447\x0430\x043B\x044C\x043D") != std::wstring::npos)) {
+            return true;
+        }
+        if (lower.find(L"unpin") != std::wstring::npos && lower.find(L"start") != std::wstring::npos) {
+            return true;
+        }
+        return false;
+    }
+
+    static std::wstring GetSearchElementAtPoint(HWND hwndSearch, POINT pt) {
+        HDESK hDesk = OpenDesktopW(L"Default", 0, FALSE, GENERIC_ALL);
+        if (hDesk) {
+            SetThreadDesktop(hDesk);
+            CloseDesktop(hDesk);
+        }
+        HRESULT hrCo = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        bool needUninit = (hrCo == S_OK || hrCo == S_FALSE);
+
+        IUIAutomation* pAutomation = nullptr;
+        if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_IUIAutomation, (void**)&pAutomation)) || !pAutomation) {
+            if (needUninit) CoUninitialize();
+            return L"";
+        }
+
+        std::wstring bestName = L"";
+
+        if (!hwndSearch) {
+            hwndSearch = WindowFromPoint(pt);
+            if (hwndSearch) {
+                HWND hRoot = GetAncestor(hwndSearch, GA_ROOT);
+                if (hRoot) hwndSearch = hRoot;
+            }
+        }
+
+        if (hwndSearch) {
+            IUIAutomationElement* pSearchElem = nullptr;
+            if (SUCCEEDED(pAutomation->ElementFromHandle(hwndSearch, &pSearchElem)) && pSearchElem) {
+                IUIAutomationCondition* pCond = nullptr;
+                pAutomation->CreateTrueCondition(&pCond);
+                if (pCond) {
+                    IUIAutomationElementArray* pArr = nullptr;
+                    int smallestArea = 99999999;
+                    if (SUCCEEDED(pSearchElem->FindAll(TreeScope_Descendants, pCond, &pArr)) && pArr) {
+                        int len = 0;
+                        pArr->get_Length(&len);
+                        for (int i = 0; i < len; ++i) {
+                            IUIAutomationElement* pItem = nullptr;
+                            if (SUCCEEDED(pArr->GetElement(i, &pItem)) && pItem) {
+                                RECT rc = {};
+                                if (SUCCEEDED(pItem->get_CurrentBoundingRectangle(&rc)) && PtInRect(&rc, pt)) {
+                                    BSTR bName = nullptr;
+                                    pItem->get_CurrentName(&bName);
+                                    int area = (rc.right - rc.left) * (rc.bottom - rc.top);
+                                    if (bName && SysStringLen(bName) > 0) {
+                                        std::wstring s = bName;
+                                        if (s != L"CoreInput" && s != L"Поиск" && s != L"Search" && s != L"Контекстное меню" && s != L"Context Menu") {
+                                            if (area > 0 && area < smallestArea) {
+                                                smallestArea = area;
+                                                bestName = s;
+                                            }
+                                        }
+                                    }
+                                    if (bName) SysFreeString(bName);
+                                }
+                                pItem->Release();
+                            }
+                        }
+                        pArr->Release();
+                    }
+                    pCond->Release();
+                }
+                pSearchElem->Release();
+            }
+        }
+
+        if (bestName.empty()) {
+            IUIAutomationElement* pElem = nullptr;
+            if (SUCCEEDED(pAutomation->ElementFromPoint(pt, &pElem)) && pElem) {
+                BSTR bn = nullptr;
+                pElem->get_CurrentName(&bn);
+                if (bn && SysStringLen(bn) > 0) {
+                    std::wstring s = bn;
+                    if (s != L"CoreInput" && s != L"Поиск" && s != L"Search") bestName = s;
+                }
+                if (bn) SysFreeString(bn);
+                pElem->Release();
+            }
+        }
+
+        pAutomation->Release();
+        if (needUninit) CoUninitialize();
+        return bestName;
+    }
 
     static DWORD WINAPI HookThreadProc(LPVOID) {
+        HDESK hDefaultDesk = OpenDesktopW(L"Default", 0, FALSE, GENERIC_ALL);
+        if (hDefaultDesk) {
+            SetThreadDesktop(hDefaultDesk);
+            CloseDesktop(hDefaultDesk);
+        }
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER, IID_IUIAutomation, (void**)&g_pUIAutomation);
 
         g_hKeyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, g_hInst, 0);
         g_hMouseHook = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, g_hInst, 0);
@@ -420,12 +582,18 @@ public:
 
         if (g_hKeyboardHook) { UnhookWindowsHookEx(g_hKeyboardHook); g_hKeyboardHook = nullptr; }
         if (g_hMouseHook) { UnhookWindowsHookEx(g_hMouseHook); g_hMouseHook = nullptr; }
+        if (g_pUIAutomation) {
+            g_pUIAutomation->Release();
+            g_pUIAutomation = nullptr;
+        }
 
         CoUninitialize();
         return 0;
     }
 
     static void Install(HWND targetWnd, HINSTANCE hInst) {
+        g_startWatcherRunning = true;
+        g_hStartWatcherThread = CreateThread(nullptr, 0, StartMenuWatcherThreadProc, nullptr, 0, nullptr);
         g_hTargetWnd = targetWnd;
         g_hInst = hInst;
 
@@ -446,10 +614,22 @@ public:
             EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
             nullptr, WinEventProc, 0, 0,
             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+
+        g_hWinEventShowHook = SetWinEventHook(
+            EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW,
+            nullptr, WinEventProc, 0, 0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     }
 
     static void Uninstall() {
+        g_startWatcherRunning = false;
+        if (g_hStartWatcherThread) {
+            WaitForSingleObject(g_hStartWatcherThread, 1500);
+            CloseHandle(g_hStartWatcherThread);
+            g_hStartWatcherThread = nullptr;
+        }
         if (g_hWinEventHook) { UnhookWinEvent(g_hWinEventHook); g_hWinEventHook = nullptr; }
+        if (g_hWinEventShowHook) { UnhookWinEvent(g_hWinEventShowHook); g_hWinEventShowHook = nullptr; }
         if (g_hookThreadId) {
             PostThreadMessageW(g_hookThreadId, WM_QUIT, 0, 0);
         }

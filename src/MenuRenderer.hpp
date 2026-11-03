@@ -287,11 +287,29 @@ public:
                               const RECT& pwrRect, bool pwrHovered,
                               const RECT& setRect, bool setHovered,
                               const RECT& expRect, bool expHovered,
-                              const RECT& dwnRect, bool dwnHovered) {
+                              const RECT& dwnRect, bool dwnHovered,
+                              bool isSearchMode = false, int searchResultCount = 0,
+                              const std::wstring& hoveredItemPath = L"") {
         float footerY = (float)rc.bottom - 52.0f;
 
-        Gdiplus::Pen divPen(Config::IsDarkMode() ? Gdiplus::Color(20, 255, 255, 255) : Gdiplus::Color(15, 0, 0, 0), 1.0f);
-        g.DrawLine(&divPen, 40.0f, footerY, (float)rc.right - 40.0f, footerY);
+        if (!isSearchMode) {
+            Gdiplus::Pen divPen(Config::IsDarkMode() ? Gdiplus::Color(20, 255, 255, 255) : Gdiplus::Color(15, 0, 0, 0), 1.0f);
+            g.DrawLine(&divPen, 40.0f, footerY, (float)rc.right - 40.0f, footerY);
+        }
+
+        if (isSearchMode) {
+            Gdiplus::RectF countRect(40.0f, footerY + 1.0f, (float)rc.right - 240.0f, 50.0f);
+            Gdiplus::StringFormat leftFmt;
+            leftFmt.SetAlignment(Gdiplus::StringAlignmentNear);
+            leftFmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+            leftFmt.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+
+            Gdiplus::SolidBrush secBrush(GetTextSecondaryColor());
+            std::wstring formattedCount = Config::FormatNumberWithSpaces(searchResultCount);
+            const wchar_t* prefix = Config::IsRussian() ? L"\x041E\x0431\x044A\x0435\x043A\x0442\x043E\x0432: " : L"Objects: ";
+            std::wstring txt = prefix + formattedCount;
+            g.DrawString(txt.c_str(), -1, g_pHintFont, countRect, &leftFmt, &secBrush);
+        }
 
         Gdiplus::StringFormat centerFormat;
         centerFormat.SetAlignment(Gdiplus::StringAlignmentCenter);
@@ -520,17 +538,236 @@ public:
         RestoreDC(memDC, savedDC);
     }
 
-    static void DrawScrollBar(Gdiplus::Graphics& g, const RECT& rc, int gridStartY, int viewportHeight, int scrollY, int maxScrollY) {
+    static void DrawSearchTableHeader(Gdiplus::Graphics& g, const RECT& rc) {
+        Gdiplus::RectF hdrRect(32.0f, 66.0f, 676.0f, 28.0f);
+        Gdiplus::GraphicsPath hdrPath;
+        AddRoundedRectToPath(hdrPath, hdrRect, 6.0f);
+        Gdiplus::SolidBrush hdrBg(Config::IsDarkMode() ? Gdiplus::Color(14, 255, 255, 255) : Gdiplus::Color(14, 0, 0, 0));
+        g.FillPath(&hdrBg, &hdrPath);
+
+        Gdiplus::StringFormat hdrFmt;
+        hdrFmt.SetAlignment(Gdiplus::StringAlignmentNear);
+        hdrFmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        hdrFmt.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+        hdrFmt.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+
+        Gdiplus::SolidBrush hdrBrush(GetTextSecondaryColor());
+        Gdiplus::Pen sepPen(GetBorderColor(), 1.0f);
+
+        const wchar_t* colName = Config::IsRussian() ? L"\x0418\x043C\x044F" : L"Name";
+        const wchar_t* colPath = Config::IsRussian() ? L"\x041F\x0443\x0442\x044C" : L"Path";
+        const wchar_t* colSize = Config::IsRussian() ? L"\x0420\x0430\x0437\x043C\x0435\x0440" : L"Size";
+        const wchar_t* colDate = Config::IsRussian() ? L"\x0414\x0430\x0442\x0430" : L"Date";
+
+        Gdiplus::RectF nameHdr(42.0f, 66.0f, 172.0f, 28.0f);
+        g.DrawString(colName, -1, g_pTooltipBoldFont, nameHdr, &hdrFmt, &hdrBrush);
+        g.DrawLine(&sepPen, 218.0f, 72.0f, 218.0f, 88.0f);
+
+        Gdiplus::RectF pathHdr(226.0f, 66.0f, 278.0f, 28.0f);
+        g.DrawString(colPath, -1, g_pTooltipBoldFont, pathHdr, &hdrFmt, &hdrBrush);
+        g.DrawLine(&sepPen, 510.0f, 72.0f, 510.0f, 88.0f);
+
+        Gdiplus::RectF sizeHdr(518.0f, 66.0f, 66.0f, 28.0f);
+        g.DrawString(colSize, -1, g_pTooltipBoldFont, sizeHdr, &hdrFmt, &hdrBrush);
+        g.DrawLine(&sepPen, 590.0f, 72.0f, 590.0f, 88.0f);
+
+        Gdiplus::RectF dateHdr(598.0f, 66.0f, 88.0f, 28.0f);
+        g.DrawString(colDate, -1, g_pTooltipBoldFont, dateHdr, &hdrFmt, &hdrBrush);
+    }
+
+    template <typename RowProviderFunc>
+    static void DrawTableList(Gdiplus::Graphics& g, HDC memDC, const RECT& rc,
+                              int totalCount,
+                              RowProviderFunc&& getRowInfo,
+                              int startX, int startY, int rowHeight, int viewportHeight,
+                              int scrollY, int hoveredIndex,
+                              int justLaunchedIdx, DWORD justLaunchedTime) {
+        int savedDC = SaveDC(memDC);
+        HRGN hGdiClipRgn = CreateRectRgn(startX - 2, startY, startX + 680, startY + viewportHeight);
+        SelectClipRgn(memDC, hGdiClipRgn);
+        DeleteObject(hGdiClipRgn);
+
+        Gdiplus::RectF clipRectF((float)startX - 2.0f, (float)startY, 680.0f, (float)viewportHeight);
+        g.SetClip(clipRectF);
+
+        Gdiplus::StringFormat nearFormat;
+        nearFormat.SetAlignment(Gdiplus::StringAlignmentNear);
+        nearFormat.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        nearFormat.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+        nearFormat.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+
+        Gdiplus::StringFormat pathFormat;
+        pathFormat.SetAlignment(Gdiplus::StringAlignmentNear);
+        pathFormat.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        pathFormat.SetTrimming(Gdiplus::StringTrimmingEllipsisPath);
+        pathFormat.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+
+        Gdiplus::SolidBrush primaryBrush(GetTextPrimaryColor());
+        Gdiplus::SolidBrush secondaryBrush(GetTextSecondaryColor());
+        Gdiplus::Color sepCol = Config::IsDarkMode() ? Gdiplus::Color(10, 255, 255, 255) : Gdiplus::Color(10, 0, 0, 0);
+        Gdiplus::Pen sepPen(sepCol, 1.0f);
+
+        DWORD now = GetTickCount();
+
+        int firstVisible = (std::max)(0, (scrollY - 4) / rowHeight);
+        int lastVisible = (std::min)(totalCount - 1, (scrollY + viewportHeight + 4) / rowHeight);
+
+        for (int i = firstVisible; i <= lastVisible; ++i) {
+            std::wstring name, path, sizeStr, dateStr, target;
+            HICON hIcon = nullptr;
+            bool isDir = false;
+            if (!getRowInfo(i, name, path, sizeStr, dateStr, hIcon, isDir, target)) continue;
+
+            int rowTop = startY + (int)i * rowHeight - scrollY;
+            Gdiplus::RectF rowRect((float)startX, (float)rowTop + 1.0f, 676.0f, (float)rowHeight - 2.0f);
+
+            if (i == justLaunchedIdx && (now - justLaunchedTime) < 400) {
+                Gdiplus::GraphicsPath rowPath;
+                AddRoundedRectToPath(rowPath, rowRect, 5.0f);
+                Gdiplus::SolidBrush flashBrush(Gdiplus::Color(60, 0, 120, 215));
+                g.FillPath(&flashBrush, &rowPath);
+            } else if (i == hoveredIndex) {
+                Gdiplus::GraphicsPath rowPath;
+                AddRoundedRectToPath(rowPath, rowRect, 5.0f);
+                Gdiplus::SolidBrush hovBrush(GetHoverColor());
+                g.FillPath(&hovBrush, &rowPath);
+            }
+
+            int iconSize = 18;
+            int iconY = rowTop + (rowHeight - iconSize) / 2;
+            if (hIcon) {
+                DrawIconEx(memDC, startX + 6, iconY, hIcon, iconSize, iconSize, 0, (HBRUSH)NULL, DI_NORMAL);
+            }
+
+            Gdiplus::RectF nameRect((float)startX + 28.0f, (float)rowTop, 172.0f, (float)rowHeight);
+            g.DrawString(name.c_str(), -1, g_pMenuFont, nameRect, &nearFormat, &primaryBrush);
+
+            Gdiplus::RectF pathRect(226.0f, (float)rowTop, 278.0f, (float)rowHeight);
+            g.DrawString(path.c_str(), -1, g_pHintFont, pathRect, &pathFormat, &secondaryBrush);
+
+            Gdiplus::RectF sizeRect(518.0f, (float)rowTop, 66.0f, (float)rowHeight);
+            g.DrawString(sizeStr.c_str(), -1, g_pHintFont, sizeRect, &nearFormat, &secondaryBrush);
+
+            Gdiplus::RectF dateRect(598.0f, (float)rowTop, 88.0f, (float)rowHeight);
+            g.DrawString(dateStr.c_str(), -1, g_pHintFont, dateRect, &nearFormat, &secondaryBrush);
+
+            if (i + 1 < totalCount) {
+                g.DrawLine(&sepPen, (float)startX + 4.0f, (float)(rowTop + rowHeight - 1), (float)startX + 672.0f, (float)(rowTop + rowHeight - 1));
+            }
+        }
+
+        g.ResetClip();
+        RestoreDC(memDC, savedDC);
+    }
+
+    static void DrawSearchItemTooltip(Gdiplus::Graphics& g,
+                                      const std::wstring& name,
+                                      const std::wstring& fullPath,
+                                      const std::wstring& sizeStr,
+                                      const std::wstring& dateStr,
+                                      bool isDir,
+                                      int rowTop, int rowHeight, int menuWidth) {
+        if (fullPath.empty()) return;
+
+        Gdiplus::StringFormat singleLineFmt;
+        singleLineFmt.SetAlignment(Gdiplus::StringAlignmentNear);
+        singleLineFmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        singleLineFmt.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+
+        Gdiplus::StringFormat pathFmt;
+        pathFmt.SetAlignment(Gdiplus::StringAlignmentNear);
+        pathFmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        pathFmt.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+        pathFmt.SetTrimming(Gdiplus::StringTrimmingEllipsisPath);
+
+        Gdiplus::RectF layoutRect(0.0f, 0.0f, 620.0f, 30.0f);
+        Gdiplus::RectF pathBox;
+        g.MeasureString(fullPath.c_str(), -1, g_pTooltipFont, layoutRect, &singleLineFmt, &pathBox);
+
+        Gdiplus::RectF nameBox;
+        g.MeasureString(name.c_str(), -1, g_pTooltipBoldFont, layoutRect, &singleLineFmt, &nameBox);
+
+        bool hasMeta = (!sizeStr.empty() || !dateStr.empty());
+        float contentW = (std::max)(nameBox.Width + 48.0f, pathBox.Width + 48.0f);
+        float tipW = (std::min)(660.0f, (std::max)(300.0f, contentW));
+        float tipH = hasMeta ? 72.0f : 54.0f;
+
+        float tipX = 40.0f;
+        if (tipW < 640.0f) {
+            tipX = (std::max)(32.0f, (std::min)((float)menuWidth - tipW - 32.0f, 40.0f));
+        }
+
+        float tipY = (float)rowTop + (float)rowHeight + 6.0f;
+        if (rowTop >= 360) {
+            tipY = (float)rowTop - tipH - 6.0f;
+        }
+
+        Gdiplus::RectF tipRect(tipX, tipY, tipW, tipH);
+
+        for (int s = 4; s >= 1; --s) {
+            Gdiplus::GraphicsPath sPath;
+            Gdiplus::RectF sRect = tipRect;
+            sRect.Offset(0.0f, (float)s * 1.5f);
+            sRect.Inflate((float)s * 1.0f, (float)s * 1.0f);
+            AddRoundedRectToPath(sPath, sRect, 8.0f + (float)s);
+            Gdiplus::SolidBrush sBrush(Config::IsDarkMode() ? Gdiplus::Color(28, 0, 0, 0) : Gdiplus::Color(14, 0, 0, 0));
+            g.FillPath(&sBrush, &sPath);
+        }
+
+        Gdiplus::GraphicsPath tipPath;
+        AddRoundedRectToPath(tipPath, tipRect, 8.0f);
+        Gdiplus::Color cardBg = Config::IsDarkMode() ? Gdiplus::Color(255, 34, 34, 36) : Gdiplus::Color(255, 255, 255, 255);
+        Gdiplus::Color borderCol = Config::IsDarkMode() ? Gdiplus::Color(200, 72, 72, 76) : Gdiplus::Color(200, 210, 210, 216);
+        Gdiplus::SolidBrush bgBrush(cardBg);
+        Gdiplus::Pen borderPen(borderCol, 1.0f);
+        g.FillPath(&bgBrush, &tipPath);
+        g.DrawPath(&borderPen, &tipPath);
+
+        Gdiplus::RectF iconBox(tipX + 10.0f, tipY + 8.0f, 18.0f, 18.0f);
+        Gdiplus::StringFormat iconFmt;
+        iconFmt.SetAlignment(Gdiplus::StringAlignmentCenter);
+        iconFmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        Gdiplus::SolidBrush iconBrush(GetTextSecondaryColor());
+        g.DrawString(isDir ? L"\xED25" : L"\xE7C3", -1, g_pTooltipGlyphFont, iconBox, &iconFmt, &iconBrush);
+
+        Gdiplus::RectF nBox(tipX + 32.0f, tipY + 7.0f, tipW - 44.0f, 20.0f);
+        Gdiplus::SolidBrush nameBrush(GetTextPrimaryColor());
+        g.DrawString(name.c_str(), -1, g_pTooltipBoldFont, nBox, &singleLineFmt, &nameBrush);
+
+        Gdiplus::RectF pBox(tipX + 32.0f, tipY + 28.0f, tipW - 44.0f, 18.0f);
+        Gdiplus::SolidBrush pathBrush(GetTextSecondaryColor());
+        g.DrawString(fullPath.c_str(), -1, g_pTooltipFont, pBox, &pathFmt, &pathBrush);
+
+        if (hasMeta) {
+            std::wstring meta;
+            if (!sizeStr.empty()) meta += sizeStr;
+            if (!sizeStr.empty() && !dateStr.empty()) meta += L"   \x2022   ";
+            if (!dateStr.empty()) meta += dateStr;
+
+            Gdiplus::RectF metaRect(tipX + 32.0f, tipY + 48.0f, tipW - 44.0f, 18.0f);
+            Gdiplus::SolidBrush metaBrush(GetTextSecondaryColor());
+            g.DrawString(meta.c_str(), -1, g_pHintFont, metaRect, &singleLineFmt, &metaBrush);
+        }
+    }
+
+    static void DrawScrollBar(Gdiplus::Graphics& g, const RECT& rc, int gridStartY, int viewportHeight, int scrollY, int maxScrollY, bool isHovered = false, bool isDragging = false) {
         if (maxScrollY <= 0) return;
 
         float scrollTrackHeight = (float)viewportHeight;
-        float thumbHeight = (std::max)(32.0f, scrollTrackHeight * scrollTrackHeight / (scrollTrackHeight + maxScrollY));
+        float thumbHeight = (std::max)(32.0f, scrollTrackHeight * scrollTrackHeight / (scrollTrackHeight + (float)maxScrollY));
         float thumbY = (float)gridStartY + ((float)scrollY / (float)maxScrollY) * (scrollTrackHeight - thumbHeight);
 
-        Gdiplus::RectF scrollThumbRect((float)rc.right - 14.0f, thumbY, 4.0f, thumbHeight);
+        bool active = (isHovered || isDragging);
+        float thumbWidth = active ? 8.0f : 4.0f;
+        float thumbX = active ? ((float)rc.right - 16.0f) : ((float)rc.right - 14.0f);
+        float cornerRadius = active ? 4.0f : 2.0f;
+
+        Gdiplus::RectF scrollThumbRect(thumbX, thumbY, thumbWidth, thumbHeight);
         Gdiplus::GraphicsPath thumbPath;
-        AddRoundedRectToPath(thumbPath, scrollThumbRect, 2.0f);
-        Gdiplus::Color thumbColor = Config::IsDarkMode() ? Gdiplus::Color(70, 255, 255, 255) : Gdiplus::Color(70, 0, 0, 0);
+        AddRoundedRectToPath(thumbPath, scrollThumbRect, cornerRadius);
+
+        int alpha = isDragging ? 180 : (isHovered ? 130 : 70);
+        Gdiplus::Color thumbColor = Config::IsDarkMode() ? Gdiplus::Color(alpha, 255, 255, 255) : Gdiplus::Color(alpha, 0, 0, 0);
         Gdiplus::SolidBrush thumbBrush(thumbColor);
         g.FillPath(&thumbBrush, &thumbPath);
     }
@@ -566,27 +803,8 @@ public:
     }
 
     static std::wstring ResolveItemContainingDirectory(const AppItem& item) {
-        std::wstring path = item.target;
-        if (path.length() >= 2 && path.front() == L'"' && path.back() == L'"') {
-            path = path.substr(1, path.length() - 2);
-        }
-
-        if (item.isDirectory) {
-            return path;
-        }
-
-        size_t dotPos = path.find_last_of(L'.');
-        if (dotPos != std::wstring::npos && _wcsicmp(path.c_str() + dotPos, L".lnk") == 0) {
-            std::wstring iconPath;
-            int iconIdx = 0;
-            std::wstring realTarget = AppIndexer::ResolveLnkTarget(path, iconPath, iconIdx);
-            if (!realTarget.empty() && realTarget != path) {
-                path = realTarget;
-            }
-        }
-
-        path = Config::ResolveAppPath(path);
-
+        if (item.isDirectory) return item.target;
+        std::wstring path = AppIndexer::ResolveItemRealTargetPath(item);
         size_t slash = path.find_last_of(L"\\/");
         if (slash != std::wstring::npos) {
             return path.substr(0, slash);
@@ -594,98 +812,156 @@ public:
         return path;
     }
 
-    static void DrawItemPathTooltip(Gdiplus::Graphics& g, const AppItem& item, int tileX, int tileY, int cellWidth, int cellHeight, int menuWidth) {
-        std::wstring displayLocation = ResolveItemContainingDirectory(item);
-        if (displayLocation.empty()) return;
+    static void DrawItemPathTooltip(Gdiplus::Graphics& g, const AppItem& item, int tileX, int tileY, int cellWidth, int cellHeight, int menuWidth, int menuHeight = 0) {
+        std::wstring realPath = AppIndexer::ResolveItemRealTargetPath(item);
+        if (realPath.empty()) {
+            realPath = item.target;
+        }
+        if (realPath.empty()) return;
 
-        bool hasLongTitle = (item.name.length() > 16);
-
-        Gdiplus::RectF layoutRect(0.0f, 0.0f, 340.0f, 40.0f);
-        Gdiplus::RectF pathBox;
-        Gdiplus::StringFormat measureFormat;
-        measureFormat.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
-        measureFormat.SetTrimming(Gdiplus::StringTrimmingEllipsisPath);
-        g.MeasureString(displayLocation.c_str(), -1, g_pTooltipFont, layoutRect, &measureFormat, &pathBox);
-
-        Gdiplus::RectF titleBox(0.0f, 0.0f, 0.0f, 0.0f);
-        if (hasLongTitle) {
-            Gdiplus::StringFormat titleMeasureFmt;
-            titleMeasureFmt.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
-            titleMeasureFmt.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
-            g.MeasureString(item.name.c_str(), -1, g_pTooltipBoldFont, layoutRect, &titleMeasureFmt, &titleBox);
+        bool isDir = item.isDirectory;
+        DWORD attr = GetFileAttributesW(realPath.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            isDir = true;
         }
 
-        float contentW = (std::max)(pathBox.Width + 34.0f, titleBox.Width + 24.0f);
-        float tipW = (std::min)(360.0f, (std::max)(110.0f, contentW));
-        float tipH = hasLongTitle ? 44.0f : 26.0f;
-
-        float tipX = (float)tileX + ((float)cellWidth - tipW) / 2.0f;
-        if (tipX < 24.0f) tipX = 24.0f;
-        if (tipX + tipW > (float)menuWidth - 24.0f) tipX = (float)menuWidth - 24.0f - tipW;
-
-        float tipY = (float)tileY - tipH - 6.0f;
-        if (tipY < 106.0f) {
-            tipY = (float)tileY + (float)cellHeight + 6.0f;
+        std::wstring displayTarget = realPath;
+        if (displayTarget.rfind(L"shell:AppsFolder\\", 0) == 0) {
+            displayTarget = Config::IsRussian() ? L"\x041F\x0440\x0438\x043B\x043E\x0436\x0435\x043D\x0438\x0435" : L"Application";
         }
 
-        Gdiplus::RectF tipRect(tipX, tipY, tipW, tipH);
+        std::wstring sizeStr = item.sizeStr;
+        std::wstring dateStr = item.dateStr;
 
-        Gdiplus::RectF shadowRect = tipRect;
-        shadowRect.Offset(0.0f, 1.5f);
-        shadowRect.Inflate(1.5f, 1.5f);
-        Gdiplus::GraphicsPath shadowPath;
-        AddRoundedRectToPath(shadowPath, shadowRect, 7.0f);
-        Gdiplus::SolidBrush shadowBrush(Config::IsDarkMode() ? Gdiplus::Color(70, 0, 0, 0) : Gdiplus::Color(25, 0, 0, 0));
-        g.FillPath(&shadowBrush, &shadowPath);
+        if ((sizeStr.empty() && !isDir) || dateStr.empty()) {
+            WIN32_FILE_ATTRIBUTE_DATA fad;
+            const wchar_t* queryTarget = (attr != INVALID_FILE_ATTRIBUTES) ? realPath.c_str() : item.target.c_str();
+            if (GetFileAttributesExW(queryTarget, GetFileExInfoStandard, &fad)) {
+                if (!isDir && sizeStr.empty()) {
+                    ULARGE_INTEGER ul;
+                    ul.LowPart = fad.nFileSizeLow;
+                    ul.HighPart = fad.nFileSizeHigh;
+                    uint64_t bytes = ul.QuadPart;
 
-        Gdiplus::GraphicsPath cardPath;
-        AddRoundedRectToPath(cardPath, tipRect, 6.0f);
-        Gdiplus::Color cardBgColor = Config::IsDarkMode() 
-            ? Gdiplus::Color(248, 44, 44, 44) 
-            : Gdiplus::Color(250, 255, 255, 255);
-        Gdiplus::SolidBrush cardBrush(cardBgColor);
-        g.FillPath(&cardBrush, &cardPath);
+                    wchar_t szBuf[32];
+                    if (bytes < 1024) {
+                        swprintf_s(szBuf, Config::IsRussian() ? L"%llu \x0411" : L"%llu B", bytes);
+                    } else if (bytes < 1024 * 1024) {
+                        uint64_t kb = (bytes + 1023) / 1024;
+                        swprintf_s(szBuf, Config::IsRussian() ? L"%llu \x041A\x0411" : L"%llu KB", kb);
+                    } else if (bytes < 1024ULL * 1024 * 1024) {
+                        double mb = (double)bytes / (1024.0 * 1024.0);
+                        swprintf_s(szBuf, Config::IsRussian() ? L"%.1f \x041C\x0411" : L"%.1f MB", mb);
+                    } else {
+                        double gb = (double)bytes / (1024.0 * 1024.0 * 1024.0);
+                        swprintf_s(szBuf, Config::IsRussian() ? L"%.2f \x0413\x0411" : L"%.2f GB", gb);
+                    }
+                    sizeStr = szBuf;
+                }
 
-        Gdiplus::Color cardBorderColor = Config::IsDarkMode() 
-            ? Gdiplus::Color(180, 68, 68, 68) 
-            : Gdiplus::Color(180, 215, 215, 220);
-        Gdiplus::Pen cardPen(cardBorderColor, 1.0f);
-        g.DrawPath(&cardPen, &cardPath);
+                if (dateStr.empty()) {
+                    FILETIME localFt;
+                    if (FileTimeToLocalFileTime(&fad.ftLastWriteTime, &localFt)) {
+                        SYSTEMTIME st;
+                        if (FileTimeToSystemTime(&localFt, &st)) {
+                            wchar_t dtBuf[32];
+                            swprintf_s(dtBuf, L"%02d.%02d.%04d %02d:%02d", st.wDay, st.wMonth, st.wYear, st.wHour, st.wMinute);
+                            dateStr = dtBuf;
+                        }
+                    }
+                }
+            }
+        }
+
+        std::wstring meta;
+        if (!sizeStr.empty()) meta += sizeStr;
+        if (!sizeStr.empty() && !dateStr.empty()) meta += L"   \x2022   ";
+        if (!dateStr.empty()) meta += dateStr;
+        bool hasMeta = !meta.empty();
 
         Gdiplus::StringFormat singleLineFmt;
         singleLineFmt.SetAlignment(Gdiplus::StringAlignmentNear);
         singleLineFmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
         singleLineFmt.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
 
-        if (hasLongTitle) {
-            singleLineFmt.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
-            Gdiplus::RectF nameBox(tipX + 10.0f, tipY + 3.0f, tipW - 20.0f, 18.0f);
-            Gdiplus::SolidBrush nameBrush(GetTextPrimaryColor());
-            g.DrawString(item.name.c_str(), -1, g_pTooltipBoldFont, nameBox, &singleLineFmt, &nameBrush);
+        Gdiplus::StringFormat pathFmt;
+        pathFmt.SetAlignment(Gdiplus::StringAlignmentNear);
+        pathFmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        pathFmt.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+        pathFmt.SetTrimming(Gdiplus::StringTrimmingEllipsisPath);
 
-            Gdiplus::StringFormat centerFmt;
-            centerFmt.SetAlignment(Gdiplus::StringAlignmentCenter);
-            centerFmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-            Gdiplus::RectF iconBox(tipX + 8.0f, tipY + 22.0f, 14.0f, 18.0f);
-            Gdiplus::SolidBrush iconBrush(GetTextSecondaryColor());
-            g.DrawString(L"\xED25", -1, g_pTooltipGlyphFont, iconBox, &centerFmt, &iconBrush);
+        Gdiplus::RectF layoutRect(0.0f, 0.0f, 620.0f, 30.0f);
+        Gdiplus::RectF nameBox;
+        g.MeasureString(item.name.c_str(), -1, g_pTooltipBoldFont, layoutRect, &singleLineFmt, &nameBox);
 
-            singleLineFmt.SetTrimming(Gdiplus::StringTrimmingEllipsisPath);
-            Gdiplus::RectF pathRow(tipX + 24.0f, tipY + 22.0f, tipW - 32.0f, 18.0f);
-            Gdiplus::SolidBrush pathBrush(GetTextSecondaryColor());
-            g.DrawString(displayLocation.c_str(), -1, g_pTooltipFont, pathRow, &singleLineFmt, &pathBrush);
-        } else {
-            Gdiplus::StringFormat centerFmt;
-            centerFmt.SetAlignment(Gdiplus::StringAlignmentCenter);
-            centerFmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-            Gdiplus::RectF iconBox(tipX + 6.0f, tipY, 16.0f, tipH);
-            Gdiplus::SolidBrush iconBrush(GetTextSecondaryColor());
-            g.DrawString(L"\xED25", -1, g_pTooltipGlyphFont, iconBox, &centerFmt, &iconBrush);
+        Gdiplus::RectF pathBox;
+        g.MeasureString(displayTarget.c_str(), -1, g_pTooltipFont, layoutRect, &singleLineFmt, &pathBox);
 
-            singleLineFmt.SetTrimming(Gdiplus::StringTrimmingEllipsisPath);
-            Gdiplus::RectF textBox(tipX + 24.0f, tipY, tipW - 30.0f, tipH);
-            Gdiplus::SolidBrush textBrush(GetTextPrimaryColor());
-            g.DrawString(displayLocation.c_str(), -1, g_pTooltipFont, textBox, &singleLineFmt, &textBrush);
+        Gdiplus::RectF metaBox(0.0f, 0.0f, 0.0f, 0.0f);
+        if (hasMeta) {
+            g.MeasureString(meta.c_str(), -1, g_pHintFont, layoutRect, &singleLineFmt, &metaBox);
+        }
+
+        float contentW = (std::max)({ nameBox.Width + 48.0f, pathBox.Width + 48.0f, metaBox.Width + 48.0f });
+        float tipW = (std::min)((float)menuWidth - 48.0f, (std::max)(220.0f, contentW));
+        float tipH = hasMeta ? 72.0f : 54.0f;
+
+        float tipX = (float)tileX + ((float)cellWidth - tipW) / 2.0f;
+        if (tipX < 24.0f) tipX = 24.0f;
+        if (tipX + tipW > (float)menuWidth - 24.0f) tipX = (float)menuWidth - 24.0f - tipW;
+
+        float tipY = (float)tileY - tipH - 8.0f;
+        if (tipY < 106.0f) {
+            tipY = (float)tileY + (float)cellHeight + 8.0f;
+        }
+        if (menuHeight > 0 && tipY + tipH > (float)menuHeight - 56.0f) {
+            if ((float)tileY - tipH - 8.0f >= 106.0f) {
+                tipY = (float)tileY - tipH - 8.0f;
+            } else {
+                tipY = (float)menuHeight - 56.0f - tipH;
+            }
+        }
+
+        Gdiplus::RectF tipRect(tipX, tipY, tipW, tipH);
+
+        for (int s = 4; s >= 1; --s) {
+            Gdiplus::GraphicsPath sPath;
+            Gdiplus::RectF sRect = tipRect;
+            sRect.Offset(0.0f, (float)s * 1.5f);
+            sRect.Inflate((float)s * 1.0f, (float)s * 1.0f);
+            AddRoundedRectToPath(sPath, sRect, 8.0f + (float)s);
+            Gdiplus::SolidBrush sBrush(Config::IsDarkMode() ? Gdiplus::Color(28, 0, 0, 0) : Gdiplus::Color(14, 0, 0, 0));
+            g.FillPath(&sBrush, &sPath);
+        }
+
+        Gdiplus::GraphicsPath tipPath;
+        AddRoundedRectToPath(tipPath, tipRect, 8.0f);
+        Gdiplus::Color cardBg = Config::IsDarkMode() ? Gdiplus::Color(255, 34, 34, 36) : Gdiplus::Color(255, 255, 255, 255);
+        Gdiplus::Color borderCol = Config::IsDarkMode() ? Gdiplus::Color(200, 72, 72, 76) : Gdiplus::Color(200, 210, 210, 216);
+        Gdiplus::SolidBrush bgBrush(cardBg);
+        Gdiplus::Pen borderPen(borderCol, 1.0f);
+        g.FillPath(&bgBrush, &tipPath);
+        g.DrawPath(&borderPen, &tipPath);
+
+        Gdiplus::RectF iconBox(tipX + 10.0f, tipY + 8.0f, 18.0f, 18.0f);
+        Gdiplus::StringFormat iconFmt;
+        iconFmt.SetAlignment(Gdiplus::StringAlignmentCenter);
+        iconFmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        Gdiplus::SolidBrush iconBrush(GetTextSecondaryColor());
+        g.DrawString(isDir ? L"\xED25" : L"\xE7C3", -1, g_pTooltipGlyphFont, iconBox, &iconFmt, &iconBrush);
+
+        Gdiplus::RectF nBox(tipX + 32.0f, tipY + 7.0f, tipW - 44.0f, 20.0f);
+        Gdiplus::SolidBrush nameBrush(GetTextPrimaryColor());
+        g.DrawString(item.name.c_str(), -1, g_pTooltipBoldFont, nBox, &singleLineFmt, &nameBrush);
+
+        Gdiplus::RectF pBox(tipX + 32.0f, tipY + 28.0f, tipW - 44.0f, 18.0f);
+        Gdiplus::SolidBrush pathBrush(GetTextSecondaryColor());
+        g.DrawString(displayTarget.c_str(), -1, g_pTooltipFont, pBox, &pathFmt, &pathBrush);
+
+        if (hasMeta) {
+            Gdiplus::RectF mBox(tipX + 32.0f, tipY + 48.0f, tipW - 44.0f, 18.0f);
+            Gdiplus::SolidBrush metaBrush(GetTextSecondaryColor());
+            g.DrawString(meta.c_str(), -1, g_pHintFont, mBox, &singleLineFmt, &metaBrush);
         }
     }
 };
