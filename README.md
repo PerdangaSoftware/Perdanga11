@@ -102,10 +102,14 @@ The script will automatically:
 - Compile the setup installer (`dist\Perdanga11_Setup.exe`) if Inno Setup is present.
 - Launch `Perdanga11.exe` immediately for testing.
 
-```
 <br>
 
 <div align="center">
+  <img src="https://raw.githubusercontent.com/PerdangaSoftware/Perdanga11/refs/heads/main/assets/ico/perdanga11.ico" width="80" alt="perdanga11.ico"/>
+  <br><br>
+  <h2>Perdanga Forever!</h2>
+</div>
+
   <img src="https://raw.githubusercontent.com/PerdangaSoftware/Perdanga11/refs/heads/main/assets/ico/perdanga11.ico" width="80" alt="perdanga11.ico"/>
   <br><br>
   <h2>Perdanga Forever!</h2>
