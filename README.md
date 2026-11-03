@@ -71,7 +71,6 @@ Perdanga11/
 │
 ├── build/                   # Temporary build artifacts (.obj, .res)
 ├── dist/                    # Packaged installers (Perdanga11_Setup.exe)
-├── build.bat                # Automated one-click compilation & packaging script
 └── clean.bat                # Cleanup script for temporary build artifacts
 ```
 
