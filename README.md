@@ -24,15 +24,6 @@
 - **Theme Support:** Automatically adapts to Windows 11 dark and light modes.
 
 
-## Technology Stack
-
-- **Core:** C++17 (MSVC), Win32 API, Shell APIs, DWM.
-- **Graphics & Rendering:** GDI+, DirectComposition, and Fluent 2 typography (`Display`, `Text`).
-- **System Hooks & Interception:** Low-level Windows hooks (`WH_KEYBOARD_LL`, `WH_MOUSE_LL`), UI Automation, and UIPI filtering.
-- **Configuration:** Supports both portable mode and user-level storage in `%APPDATA%\Perdanga11\config.ini`.
-- **Packaging:** Inno Setup 6.
-
-
 ## 📂 Project Structure
 
 ```text
@@ -68,8 +59,7 @@ Perdanga11/
 │
 ├── build/                   # Temporary build artifacts (.obj, .res)
 ├── dist/                    # Packaged installers (Perdanga11_Setup.exe)
-├── build.bat                # Automated one-click compilation & packaging script
-└── clean.bat                # Cleanup script for temporary build artifacts
+└── build.bat                # Automated one-click compilation & packaging script
 ```
 
 
@@ -100,15 +90,6 @@ The script will automatically:
 - Prepare high-resolution installer artwork from `assets\logo\perdanga11.png`.
 - Compile the setup installer (`dist\Perdanga11_Setup.exe`) if Inno Setup is present.
 - Launch `Perdanga11.exe` immediately for testing.
-
-
-### Cleaning Build Artifacts
-
-To clean all intermediate `.obj` and `.res` files from the `build\` folder:
-
-```cmd
-clean.bat
-```
 
 
 <br>
