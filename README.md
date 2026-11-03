@@ -1,6 +1,6 @@
 <br/>
 
-<img src="assets/social_preview_duo.png" alt="Perdanga 11 Preview" width="100%"/>
+
 
 </div>
 
