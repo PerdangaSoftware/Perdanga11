@@ -4,22 +4,9 @@
 
 <h1 align="center">Perdanga11</h1>
 
-<p align="center">
-  <b>Replacement for the Windows 11 Start Menu.</b>
-</p>
-
 <br/>
 
-<table align="center">
-  <tr>
-    <th align="center">Start Menu</th>
-    <th align="center">Instant Search</th>
-  </tr>
-  <tr>
-    <td align="center"><img src="https://github.com/PerdangaSoftware/Perdanga11/blob/main/assets/Perdanga11menu.png?raw=true" width="375" alt="Start Menu Preview"/></td>
-    <td align="center"><img src="https://github.com/PerdangaSoftware/Perdanga11/blob/main/assets/Perdanga11search.png?raw=true" width="375" alt="Instant Search Preview"/></td>
-  </tr>
-</table>
+<img src="assets/social_preview_duo.png" alt="Perdanga 11 Preview" width="100%"/>
 
 </div>
 
@@ -28,12 +15,22 @@
 
 - **Fast Start:** Written entirely in pure native C++ with zero third-party dependencies.
 - **High-Performance Search:** Instant search across installed applications, user libraries, and connected drives with an ultra-lightweight virtual table.
-- **Custom Categorized Tabs:** Organize your workspace with customizable tabs (Pinned, Folders, Tools, Games, etc.). Drag-and-drop tiles to rearrange, rename tabs, or create new categories with a simple right-click.
+- **Pin Anything:** Pin any file, folder, application, or packaged UWP app directly to your Start menu with native Explorer and context menu integration.
+- **Unlimited Custom Tabs:** Create as many custom tabs and categories as you want (Pinned, Folders, Tools, Games, etc.) with effortless drag-and-drop tile organization.
+- **Extremely Lightweight:** Pure native C++ with zero bloat — standalone program is ~7 MB and installer is ~3 MB.
 - **Consecutive Multi-Launch:** Launch multiple programs in succession without the menu auto-closing simply by holding `Shift` while clicking (or via middle mouse click). Standard single-click launches and dismisses immediately.
 - **Rich Fluent Tooltips:** Hovering any tile or search result displays an info card with resolved target path, file size, and last modified timestamp.
 - **Deep Shortcut Resolution:** Accurately resolves `.lnk` shortcuts to actual file targets for execution, location opening, and path copying.
-- **Native Explorer Pinning & SendTo:** Pin files, folders, and executables directly from Windows Explorer or the Desktop.
 - **Theme Support:** Automatically adapts to Windows 11 dark and light modes.
+
+
+## Technology Stack
+
+- **Core:** C++17 (MSVC), Win32 API, Shell APIs, DWM.
+- **Graphics & Rendering:** GDI+, DirectComposition, and Fluent 2 typography (`Display`, `Text`).
+- **System Hooks & Interception:** Low-level Windows hooks (`WH_KEYBOARD_LL`, `WH_MOUSE_LL`), UI Automation, and UIPI filtering.
+- **Configuration:** Supports both portable mode and user-level storage in `%APPDATA%\Perdanga11\config.ini`.
+- **Packaging:** Inno Setup 6.
 
 
 ## 📂 Project Structure
@@ -71,7 +68,8 @@ Perdanga11/
 │
 ├── build/                   # Temporary build artifacts (.obj, .res)
 ├── dist/                    # Packaged installers (Perdanga11_Setup.exe)
-└── build.bat                # Automated one-click compilation & packaging script
+├── build.bat                # Automated one-click compilation & packaging script
+└── clean.bat                # Cleanup script for temporary build artifacts
 ```
 
 
@@ -102,6 +100,15 @@ The script will automatically:
 - Prepare high-resolution installer artwork from `assets\logo\perdanga11.png`.
 - Compile the setup installer (`dist\Perdanga11_Setup.exe`) if Inno Setup is present.
 - Launch `Perdanga11.exe` immediately for testing.
+
+
+### Cleaning Build Artifacts
+
+To clean all intermediate `.obj` and `.res` files from the `build\` folder:
+
+```cmd
+clean.bat
+```
 
 
 <br>
