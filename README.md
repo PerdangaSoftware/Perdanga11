@@ -83,7 +83,7 @@ The script will automatically:
 - Compile and link `bin\Perdanga11.exe`.
 - Prepare high-resolution installer artwork from `assets\logo\perdanga11.png`.
 - Compile the setup installer (`dist\Perdanga11_Setup.exe`) if Inno Setup is present.
-- Launch `Perdanga11.exe` immediately for testing.
+- Launch `Perdanga11.exe`.
 
 
 <br>
