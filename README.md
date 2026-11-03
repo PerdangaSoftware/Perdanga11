@@ -102,16 +102,7 @@ The script will automatically:
 - Compile the setup installer (`dist\Perdanga11_Setup.exe`) if Inno Setup is present.
 - Launch `Perdanga11.exe` immediately for testing.
 
-
-### Cleaning Build Artifacts
-
-To clean all intermediate `.obj` and `.res` files from the `build\` folder:
-
-```cmd
-clean.bat
 ```
-
-
 <br>
 
 <div align="center">
