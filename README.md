@@ -1,9 +1,3 @@
-<div align="center">
-
-<img src="assets/logo/perdanga11.png" width="130" alt="Perdanga11 Logo"/>
-
-<h1 align="center">Perdanga11</h1>
-
 <br/>
 
 <img src="assets/social_preview_duo.png" alt="Perdanga 11 Preview" width="100%"/>
