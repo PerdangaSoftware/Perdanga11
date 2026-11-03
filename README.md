@@ -23,6 +23,7 @@
 
 </div>
 
+
 ## Highlights & Features
 
 - **Fast Start:** Written entirely in pure native C++ with zero third-party dependencies.
@@ -33,6 +34,7 @@
 - **Deep Shortcut Resolution:** Accurately resolves `.lnk` shortcuts to actual file targets for execution, location opening, and path copying.
 - **Native Explorer Pinning & SendTo:** Pin files, folders, and executables directly from Windows Explorer or the Desktop.
 - **Theme Support:** Automatically adapts to Windows 11 dark and light modes.
+
 
 ## 📂 Project Structure
 
@@ -102,14 +104,10 @@ The script will automatically:
 - Compile the setup installer (`dist\Perdanga11_Setup.exe`) if Inno Setup is present.
 - Launch `Perdanga11.exe` immediately for testing.
 
+
 <br>
 
 <div align="center">
-  <img src="https://raw.githubusercontent.com/PerdangaSoftware/Perdanga11/refs/heads/main/assets/ico/perdanga11.ico" width="80" alt="perdanga11.ico"/>
-  <br><br>
-  <h2>Perdanga Forever!</h2>
-</div>
-
   <img src="https://raw.githubusercontent.com/PerdangaSoftware/Perdanga11/refs/heads/main/assets/ico/perdanga11.ico" width="80" alt="perdanga11.ico"/>
   <br><br>
   <h2>Perdanga Forever!</h2>
