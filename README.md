@@ -10,7 +10,11 @@
 
 <br/>
 
-<img src="https://github.com/PerdangaSoftware/Perdanga11/blob/main/assets/Perdanga11menu.png?raw=true" width="520" alt="Perdanga11 Interface Preview"/>
+<p align="center">
+  <img src="https://github.com/PerdangaSoftware/Perdanga11/blob/main/assets/Perdanga11menu.png?raw=true" width="415" alt="Start Menu Preview"/>
+  &nbsp;&nbsp;
+  <img src="https://github.com/PerdangaSoftware/Perdanga11/blob/main/assets/Perdanga11search.png?raw=true" width="415" alt="Search Preview"/>
+</p>
 
 </div>
 
@@ -18,22 +22,13 @@
 ## Highlights & Features
 
 - **Fast Start:** Written entirely in pure native C++ with zero third-party dependencies.
-- **High-Performance Search:** Instant search across installed applications, user libraries, and connected drives with an ultra-lightweight virtual table (~20 MB RAM footprint).
+- **High-Performance Search:** Instant search across installed applications, user libraries, and connected drives with an ultra-lightweight virtual table.
 - **Custom Categorized Tabs:** Organize your workspace with customizable tabs (Pinned, Folders, Tools, Games, etc.). Drag-and-drop tiles to rearrange, rename tabs, or create new categories with a simple right-click.
 - **Consecutive Multi-Launch:** Launch multiple programs in succession without the menu auto-closing simply by holding `Shift` while clicking (or via middle mouse click). Standard single-click launches and dismisses immediately.
 - **Rich Fluent Tooltips:** Hovering any tile or search result displays an info card with resolved target path, file size, and last modified timestamp.
 - **Deep Shortcut Resolution:** Accurately resolves `.lnk` shortcuts to actual file targets for execution, location opening, and path copying.
 - **Native Explorer Pinning & SendTo:** Pin files, folders, and executables directly from Windows Explorer or the Desktop.
 - **Theme Support:** Automatically adapts to Windows 11 dark and light modes.
-
-
-## Technology Stack
-
-- **Core:** C++17 (MSVC), Win32 API, Shell APIs, DWM.
-- **Graphics & Rendering:** GDI+, DirectComposition, and Fluent 2 typography (`Display`, `Text`).
-- **System Hooks & Interception:** Low-level Windows hooks (`WH_KEYBOARD_LL`, `WH_MOUSE_LL`), UI Automation, and UIPI filtering.
-- **Configuration:** Supports both portable mode and user-level storage in `%APPDATA%\Perdanga11\config.ini`.
-- **Packaging:** Inno Setup 6.
 
 
 ## 📂 Project Structure
@@ -43,8 +38,10 @@ Perdanga11/
 ├── assets/                  # Graphical assets
 │   ├── ico/
 │   │   └── perdanga11.ico   # Application icon
-│   └── logo/
-│       └── perdanga11.png   # Fluent brand logo
+│   ├── logo/
+│   │   └── perdanga11.png   # Fluent brand logo
+│   ├── Perdanga11menu.png   # Start menu preview
+│   └── Perdanga11search.png # Instant search preview
 │
 ├── src/                     # Core Application Source Code
 │   ├── AppIndexer.hpp       # Asynchronous file indexer, icon cache & search scorer
