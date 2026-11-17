@@ -61,7 +61,7 @@ Perdanga11/
 
 ### Prerequisites
 
-1. **Windows 10 / 11 (64-bit)**
+1. **Windows 11 (64-bit)**
 2. **Visual Studio 2022** (or MSVC Build Tools) with the **"Desktop development with C++"** workload.
 3. **Inno Setup 6** (Optional, required only for compiling the setup installer wizard).
 
